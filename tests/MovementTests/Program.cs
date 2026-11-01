@@ -14,6 +14,7 @@ static class Program
     static MechMovementInvocation Walk() => new MechMovementInvocation { ActorGUID = Unit };
     static MechJumpInvocation Jump() => new MechJumpInvocation { MechGUID = Unit };
     static MechMeleeInvocation Melee() => new MechMeleeInvocation { MechGUID = Unit, TargetGUID = "enemy" };
+    static MechDFAInvocation Dfa() => new MechDFAInvocation { SourceGUID = Unit, TargetGUID = "enemy" };
     static void Check(bool value, string detail) { if (!value) throw new Exception(detail); }
     static string Validate(InvocationMessage order, bool guest = true) => MovementOrderGuard.Validate(combat, order, guest);
     static void Allowed(InvocationMessage order) => Check(Validate(order) == null, "Unexpected rejection: " + Validate(order));
@@ -56,7 +57,34 @@ static class Program
         });
         Test("Ace Pilot can fire then jump", () => { actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; Allowed(Jump()); });
         Test("Ace Pilot cannot fire then melee", () => { actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; Blocked(Melee()); });
-        Test("Ace Pilot cannot fire then DFA", () => { actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; var jump = Jump(); jump.DFATarget = new object(); Blocked(jump); });
+        Test("jump invocation with a DFA target also spends firing", () => { actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; var jump = Jump(); jump.DFATarget = new object(); Blocked(jump); });
+        Test("DFA is recognized as movement", () => Check(MovementOrderGuard.IsMovement(Dfa()), "DFA bypasses movement guard"));
+        Test("DFA actor is SourceGUID, not target", () => Check(MovementOrderGuard.ActorGuid(Dfa()) == Unit, "Wrong DFA actor"));
+        Test("first DFA remains allowed", () => Allowed(Dfa()));
+        Test("recorded seq 19-20: jump then DFA cannot buy extra movement", () => {
+            Allowed(Jump()); actor.HasMovedThisRound = true;
+            Blocked(Dfa()); Allowed(new AttackInvocation());
+            Check(!actor.HasFiredThisRound && !actor.HasActivatedThisRound, "Rejection spent firing or activation");
+        });
+        Test("Ace Pilot cannot fire then a separate DFA", () => {
+            actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; Blocked(Dfa());
+        });
+        Test("finished activation cannot DFA", () => { actor.HasActivatedThisRound = true; Blocked(Dfa()); });
+        Test("DFA with missing source is rejected", () => Blocked(new MechDFAInvocation { TargetGUID = Unit }));
+        Test("DFA with unknown source is rejected", () => Blocked(new MechDFAInvocation { SourceGUID = "missing", TargetGUID = Unit }));
+        Test("guest cannot DFA with enemy unit", () => { actor.team.GUID = "enemy"; Blocked(Dfa()); });
+        Test("host player's second move cannot be DFA", () => {
+            actor.HasMovedThisRound = true; Check(Validate(Dfa(), false) != null, "Host second move accepted");
+        });
+        Test("host enemy AI DFA is unaffected", () => {
+            actor.team.GUID = "enemy"; actor.HasMovedThisRound = true;
+            Check(Validate(Dfa(), false) == null, "Enemy AI blocked");
+        });
+        Test("authoritative guest DFA replay bypasses guard", () => {
+            CombatSync.GuestActive = true; CombatSync.Current = new CombatSync { Allow = false };
+            var order = Dfa(); order.WasNetRouted = true;
+            Check(Route(order) && CombatSync.Current.Requests == 0 && CombatSync.Current.HostChecks == 0, "DFA replay blocked");
+        });
         Test("melee target embedded in a walk still spends firing", () => { actor.HasFiredThisRound = actor.CanMoveAfterShooting = true; var move = Walk(); move.MeleeTargetGUID = "enemy"; Blocked(move); });
         Test("another unit retains its movement", () => {
             actor.HasMovedThisRound = true;

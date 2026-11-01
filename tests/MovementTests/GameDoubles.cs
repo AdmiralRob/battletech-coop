@@ -17,6 +17,7 @@ namespace BattleTech
     public class MechMovementInvocation : AbstractActorMovementInvocation { }
     public enum MoveType { Walking, Sprinting }
     public class MechJumpInvocation : InvocationMessage { public string MechGUID; public object DFATarget; }
+    public class MechDFAInvocation : InvocationMessage { public string SourceGUID, TargetGUID; }
     public class MechMeleeInvocation : InvocationMessage { public string MechGUID, TargetGUID; }
     public class AttackInvocation : InvocationMessage { }
     public class ReserveActorInvocation : InvocationMessage { }

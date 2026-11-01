@@ -11,6 +11,8 @@ orders pass through the movement guard, preserving movement followed by firing.
 The guest also retains the originating SelectionState until its matching replay
 creates an order sequence. AssignOrders allows the game's own completion handler
 to advance to firing. Rejected selections recover on a later idle update.
+The DFA review correction also guards the separate MechDFAInvocation by its
+SourceGUID and rejects it after movement or firing has already been spent.
 
 MAIN FILES
 src/BattletechCoop/Sync/MovementOrderGuard.cs
@@ -20,6 +22,7 @@ src/BattletechCoop/Patches/GuestSelectionOrderPatch.cs
 src/BattletechCoop/Patches/InvocationLogPatch.cs
 tests/MovementTests/
 TestResults/2026-11-01-movement-fix/REPORT.txt
+TestResults/2026-11-01-dfa-fix/REPORT.txt
 
 EVIDENCE
 The supplied host and guest logs showed the same actor receiving three distinct
@@ -31,11 +34,16 @@ Raw logs contain player identifiers and local machine paths and are kept locally
 
 VERIFIED AND PENDING
 Full mod compilation: passed against locally copied game libraries.
-Movement/control checks: 44/44 passed using production guard, correlation and
-routing code with lightweight game/UI doubles. Network regression: 12/12 passed.
+Movement/control checks: 56/56 passed using production guard, correlation and
+routing code with lightweight game/UI doubles, including the separate DFA type.
+Network regression: 12/12 passed on the original movement-fix baseline; not
+rerun for the isolated DFA guard correction.
 These results do not establish live UI, animation or multiplayer gameplay success.
 Next step: run the report's two-player checklist, including move-fire, repeated
 move rejection, jump-fire, Ace Pilot, reserve, new rounds and concurrent control.
+Also check first-action DFA, rejection of jump-then-DFA and fire-then-DFA, and
+free movement before contact followed by entry into combat. The original
+0.0.14 movement-test ZIP predates the DFA correction; rebuild before testing it.
 
 WORKING TOGETHER
 Use this repository and a named commit as the shared source reference. Fetch

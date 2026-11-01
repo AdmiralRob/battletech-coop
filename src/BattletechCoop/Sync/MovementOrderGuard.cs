@@ -16,12 +16,15 @@ namespace BattletechCoop.Sync
             if (jump != null) return jump.MechGUID;
             var melee = invocation as MechMeleeInvocation;
             if (melee != null) return melee.MechGUID;
+            // DFA is a separate InvocationMessage, not a MechJumpInvocation.
+            var dfa = invocation as MechDFAInvocation;
+            if (dfa != null) return dfa.SourceGUID;
             return null;
         }
 
         public static bool IsMovement(InvocationMessage invocation) =>
             invocation is AbstractActorMovementInvocation || invocation is MechJumpInvocation ||
-            invocation is MechMeleeInvocation;
+            invocation is MechMeleeInvocation || invocation is MechDFAInvocation;
 
         public static string Validate(CombatGameState combat, InvocationMessage invocation, bool guestRequest)
         {
@@ -44,7 +47,7 @@ namespace BattletechCoop.Sync
             // not a second attack disguised as a movement order.
             var move = invocation as AbstractActorMovementInvocation;
             var jump = invocation as MechJumpInvocation;
-            if (actor.HasFiredThisRound && (invocation is MechMeleeInvocation ||
+            if (actor.HasFiredThisRound && (invocation is MechMeleeInvocation || invocation is MechDFAInvocation ||
                 (move != null && !string.IsNullOrEmpty(move.MeleeTargetGUID)) ||
                 (jump != null && jump.DFATarget != null)))
                 return "that unit has already fired this round";

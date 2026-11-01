@@ -1,0 +1,57 @@
+PASS recorded seq 47-50: first move, reject two extra moves, allow fire
+PASS walk then jump cannot buy a second move
+PASS jump then fire remains legal
+PASS sprint cannot follow a walk
+PASS first sprint is allowed
+PASS melee cannot buy extra movement after a walk
+PASS first melee uses attacker rather than target
+PASS base movement invocation is guarded too
+PASS finished activation cannot move
+PASS finishing activation cannot move
+PASS unavailable unit cannot move
+PASS ordinary pilot cannot move after firing
+PASS Ace Pilot can fire then walk once
+PASS Ace Pilot can fire then jump
+PASS Ace Pilot cannot fire then melee
+PASS jump invocation with a DFA target also spends firing
+PASS DFA is recognized as movement
+PASS DFA actor is SourceGUID, not target
+PASS first DFA remains allowed
+PASS recorded seq 19-20: jump then DFA cannot buy extra movement
+PASS Ace Pilot cannot fire then a separate DFA
+PASS finished activation cannot DFA
+PASS DFA with missing source is rejected
+PASS DFA with unknown source is rejected
+PASS guest cannot DFA with enemy unit
+PASS host player's second move cannot be DFA
+PASS host enemy AI DFA is unaffected
+PASS authoritative guest DFA replay bypasses guard
+PASS melee target embedded in a walk still spends firing
+PASS another unit retains its movement
+PASS phase change does not grant a second movement
+PASS game resets movement for the next round
+PASS free movement follows the game's round reset
+PASS entering combat respects movement already spent
+PASS stand and reserve remain outside movement guard
+PASS unknown unit is rejected
+PASS missing movement GUID is rejected
+PASS guest cannot move an enemy
+PASS host enemy AI is outside this player guard
+PASS host player is guarded as well as guest
+PASS guest local order is requested and not locally executed
+PASS authoritative guest replay bypasses request and movement guard
+PASS host rejection prevents original GenericInvoke
+PASS host accepted order reaches original GenericInvoke
+PASS offline invocation unaffected
+PASS delayed replay supplies the orders needed for UI completion
+PASS host and other guest replay cannot attach to our selection
+PASS request IDs remain distinct across players and rejected requests
+PASS two pending selections bind by ID even with replies out of order
+PASS rejected order recovers current selection without spending an action
+PASS duplicate click cannot tear down a pending selection
+PASS late rejection does not reset another selected unit
+PASS rejection recovery does not discard an attached sequence
+PASS guest selection patch captures its originating state
+PASS host selection rejection schedules recovery
+PASS sequence patch binds only guest replay
+56/56 passed
