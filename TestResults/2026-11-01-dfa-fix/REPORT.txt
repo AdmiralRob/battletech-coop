@@ -1,0 +1,60 @@
+BATTLETECH CO-OP: DFA GUARD CORRECTION
+Date: November 1, 2026
+Version: 0.0.14 (test build)
+Branch: codex/0.0.14-movement-fix
+Baseline: 2aab1834f801a7a6d5b8f4a8998c49a945a189e6
+Source under test: the source in the commit containing this report.
+Review: https://github.com/AdmiralRob/battletech-coop/pull/1#discussion_r4437796065
+
+PROBLEM AND CHANGE
+Rob and Claude identified a separate MechDFAInvocation order that bypassed
+the movement guard. Game assembly inspection confirmed that it derives from
+InvocationMessage, identifies the attacker through SourceGUID, and creates a
+MechDFASequence that consumes both movement and firing.
+
+The guard now recognizes this order, resolves its attacker through SourceGUID,
+and rejects it when movement or firing has already been spent. The firing
+check also covers Ace Pilot. Ordinary AttackInvocation still passes through
+this movement guard, preserving movement followed by firing.
+
+TEST RESULTS
+Movement/UI suite: 56/56 passed on the final source.
+Command: tools/run-headless-tests.ps1 -Suite MovementTests (PowerShell 7)
+Full mod compilation against locally copied game references: passed.
+Command: tools/build-local.ps1 -ManagedDir <local game references>
+Compiler errors: 0. Compiler warnings: 0.
+One hidden unused-using diagnostic remains in unchanged ShipRequests.Company.cs.
+Built DLL SHA256:
+396B1B4334EDE66006CCA7A04E3115B28EB8A8F8042FD8552ED8955AD2A08060
+
+Twelve checks were added to the original 44-test suite using a separate
+MechDFAInvocation data double. Coverage includes first-action DFA, jump-then-DFA,
+firing-then-DFA with Ace Pilot, activation completion, actor identity, missing
+or unknown actors, guest control restrictions, host enforcement, enemy AI,
+and authoritative guest replay. The original test using MechJumpInvocation
+with a DFATarget remains and is renamed to describe that separate path.
+
+Before applying the correction, an isolated expanded suite reproduced nine
+failures against the original guard (47/56 passed). Applying the three guard
+changes made the same suite pass. The final committed tests preserve these
+cases and also pass, as recorded in MovementTests.txt.
+
+The network suite passed 12/12 on the baseline movement fix. It was not rerun
+for this isolated guard correction; networking and wire formats are unchanged.
+
+LIMITS AND LIVE CHECKLIST
+These tests execute production guard/UI-routing code with lightweight data
+doubles. They do not demonstrate a successful live Unity or multiplayer match.
+Both players should use the same newly rebuilt mod and a disposable test save.
+
+1. Walk or jump once, then fire normally. An extra move must be rejected.
+2. Use DFA as the unit's first action. Its normal sequence must complete.
+3. After jumping, attempt DFA; it must be rejected without consuming firing.
+4. With Ace Pilot, fire then walk/jump once. Fire then DFA must be rejected.
+5. Check movement before contact, entry into combat, and the next round. The
+   game must reset movement and activation flags at the expected boundaries.
+6. Repeat host/guest control and UI recovery checks from the earlier report.
+
+The previous 0.0.14 movement-test ZIP predates this correction. This source
+push does not replace that ZIP or install the mod into either player's game.
+Rebuild and package the corrected source before the next gameplay test.

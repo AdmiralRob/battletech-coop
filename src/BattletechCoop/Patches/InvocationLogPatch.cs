@@ -35,6 +35,9 @@ namespace BattletechCoop.Patches
                 return false;
             }
 
+            if (CombatSync.HostActive && !CombatSync.Current.AllowHostMovement(invocation))
+                return false;
+
             if (Main.Settings.LogInvocations && CombatSync.Current == null)
                 Log.Info($"GenericInvoke {invocation.GetType().Name} id={invocation.InvocationID} seed={invocation.RandomSeed} netRouted={message.IsNetRouted}/{message.WasNetRouted}");
             return true;

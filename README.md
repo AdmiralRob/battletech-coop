@@ -6,7 +6,26 @@
 A mod that lets 2+ players play the BattleTech (2018) single-player campaign together over
 Steam. The host owns the campaign; friends join it.
 
-## Status (0.0.13)
+## Status (0.0.14 test build)
+
+The movement fix adds host-side checks for repeated player movement and reconnects
+guest selections to their delayed replay sequences so the game can advance from
+movement to firing. Ordinary move/jump-then-fire and permitted Ace Pilot movement
+remain supported. Both players must use the same version.
+
+Full compilation succeeded; 44 movement/control tests and 12 network tests passed.
+**Live two-player gameplay verification is still pending.** The movement tests use
+game/UI data doubles and do not run Unity or install Harmony patches into a game.
+
+See [the test report and gameplay checklist](TestResults/2026-11-01-movement-fix/REPORT.txt)
+and [the shared development handoff](docs/COOP-HANDOFF.txt). The inherited 0.0.13
+results below describe the original baseline, not new validation of 0.0.14.
+
+Run `dotnet run --project tests/MovementTests` and `dotnet run --project tests/NetTests`.
+Without the SDK, PowerShell 7 can run `tools/run-headless-tests.ps1 -Suite MovementTests`
+and `tools/run-headless-tests.ps1 -Suite NetTests` in separate fresh processes.
+
+## Inherited baseline (0.0.13)
 
 Works, tested by hand over Steam and by automated two-copy tests:
 

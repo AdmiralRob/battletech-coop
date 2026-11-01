@@ -1,0 +1,7 @@
+Original local 0.0.14 test artifacts (not included in the source repository):
+
+AC605C548083A433D306939EF64A609C269088E25E57BB62911D3F9B36CA70B6  BattletechCoop.dll
+B5035FB23BDF33FC92798225AE5CB5C96D82B9100DC1E3ED88EF319AE671C49A  BattletechCoop-0.0.14-movement-test.zip
+
+These identify the test build produced before this repository handoff. They do
+not imply that every rebuild will be byte-identical.

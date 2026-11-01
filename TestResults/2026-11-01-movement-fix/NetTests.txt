@@ -1,0 +1,13 @@
+PASS  guest joins and both sides see the roster (61 ms)
+PASS  ping measures round-trip time (1057 ms)
+PASS  game messages flow both ways (76 ms)
+PASS  4 MB game message arrives intact (93 ms)
+PASS  mismatched mod list is rejected (46 ms)
+PASS  mismatched mod version is rejected (46 ms)
+PASS  two guests get distinct indices and see each other (77 ms)
+PASS  session full rejects extra guest (93 ms)
+PASS  guest leaving is reported to host and other guests (64 ms)
+PASS  host leaving closes guest session (61 ms)
+PASS  connecting to nothing fails cleanly (2071 ms)
+PASS  silent peer is dropped after handshake timeout (343 ms)
+12/12 passed

@@ -98,7 +98,7 @@ namespace BattletechCoop.Sync
 
         // Host: guest requests waiting for an idle moment. Guest: the one request in flight.
         private readonly Queue<Request> requests = new Queue<Request>();
-        private uint nextGuestInvocation;
+        private readonly PendingSelectionOrders selectionOrders = new PendingSelectionOrders();
         private uint nextRequestId;
         private uint outstandingRequest;
         private bool completeRequested;
@@ -464,10 +464,13 @@ namespace BattletechCoop.Sync
                 if (SaveDue()) { SendSave(); return; }
                 while (requests.Count > 0 && IsIdle(combat))
                     ProcessRequest(combat, requests.Dequeue());
+                if (IsIdle(combat)) selectionOrders.RecoverRejected();
                 return;
             }
             while (incoming.Count > 0 && CanApply(combat, incoming.Peek()))
                 Apply(combat, incoming.Dequeue());
+
+            if (IsIdle(combat)) selectionOrders.RecoverRejected();
 
             if (UnityEngine.Time.realtimeSinceStartup >= nextStatusTime)
             {
@@ -667,12 +670,25 @@ namespace BattletechCoop.Sync
 
         // Guest, from GenericInvoke: an order created on this machine (HUD, or the guest-side AI in
         // the Shared test). It is not run here; the host runs it and streams it back.
-        public void RequestOrder(InvocationMessage invocation)
+        public void RequestOrder(InvocationMessage invocation, SelectionState selection = null)
         {
-            if (outstandingRequest != 0)
+            if (outstandingRequest != 0 || selectionOrders.Contains(selection))
             {
                 ShowNotice($"Waiting for the host to confirm your last order; {invocation.GetType().Name} ignored");
+                selectionOrders.RejectLocal(selection);
                 return;
+            }
+            var combat = UnityGameInstance.BattleTechGame?.Combat;
+            if (combat != null)
+            {
+                var reason = MovementOrderGuard.Validate(combat, invocation, true);
+                if (reason != null)
+                {
+                    Log.Info("SYNC guest: blocked movement " + MovementOrderGuard.Describe(combat, invocation));
+                    ShowNotice(reason);
+                    selectionOrders.RejectLocal(selection);
+                    return;
+                }
             }
             byte[] data;
             try
@@ -682,9 +698,11 @@ namespace BattletechCoop.Sync
             catch (Exception e)
             {
                 Log.Error($"SYNC guest: could not serialize {invocation.GetType().Name}", e);
+                selectionOrders.RejectLocal(selection);
                 return;
             }
             outstandingRequest = ++nextRequestId;
+            selectionOrders.Track(PendingSelectionOrders.InvocationId(session.LocalIndex, outstandingRequest), selection);
             session.SendGame(ChannelOrderRequest, Build(w =>
             {
                 w.Write(CombatId);
@@ -726,6 +744,7 @@ namespace BattletechCoop.Sync
             outstandingRequest = 0;
             if (!accepted)
             {
+                selectionOrders.Reject(PendingSelectionOrders.InvocationId(session.LocalIndex, id));
                 completeRequested = false;
                 ShowNotice("Order not accepted: " + reason);
             }
@@ -754,7 +773,7 @@ namespace BattletechCoop.Sync
             {
                 try
                 {
-                    if (request.Kind == RequestKind.Invocation) RunGuestOrder(combat, request);
+                    if (request.Kind == RequestKind.Invocation) reason = RunGuestOrder(combat, request);
                     else CompleteForGuest(combat, request);
                 }
                 catch (Exception e)
@@ -789,17 +808,45 @@ namespace BattletechCoop.Sync
             return null;
         }
 
-        private void RunGuestOrder(CombatGameState combat, Request request)
+        private string RunGuestOrder(CombatGameState combat, Request request)
         {
             var invocation = GameSerializer.DeserializeMessage(request.Data) as InvocationMessage;
             if (invocation == null) throw new InvalidDataException("request did not contain an invocation");
-            // A fresh ID: the guest's own counter could collide with the host's (same machine prefix on one PC).
+            var reason = MovementOrderGuard.Validate(combat, invocation, true);
+            if (MovementOrderGuard.IsMovement(invocation))
+                Log.Info($"SYNC host: movement request {request.Id}: {MovementOrderGuard.Describe(combat, invocation)} result={reason ?? "allowed"}");
+            if (reason != null) return reason;
+            // Namespace by sender and request, so guest HUD selections can correlate their
+            // delayed replay even if OrderResult arrives before or after it. Engine-generated
+            // IDs alone can collide when two test copies use the same machine prefix.
             // The setter is private on the base class, so write its backing field.
             AccessTools.Field(typeof(InvocationMessage), "<InvocationID>k__BackingField")
-                .SetValue(invocation, $"G{request.Sender}.{++nextGuestInvocation}");
+                .SetValue(invocation, PendingSelectionOrders.InvocationId(request.Sender, request.Id));
             Log.Info($"SYNC host: accepted guest {request.Sender} request {request.Id} {invocation.GetType().Name} as {invocation.InvocationID}");
             combat.MessageCenter.PublishMessage(invocation);
+            return null;
         }
+
+        // Host-local commands and guest requests both pass through GenericInvoke. Guest
+        // requests are also checked above so a rejection is returned to their sender.
+        public bool AllowHostMovement(InvocationMessage invocation)
+        {
+            var combat = UnityGameInstance.BattleTechGame?.Combat;
+            if (combat == null) return true;
+            var reason = MovementOrderGuard.Validate(combat, invocation, false);
+            if (reason == null) return true;
+            Log.Info("SYNC host: blocked movement " + MovementOrderGuard.Describe(combat, invocation));
+            ShowNotice(reason);
+            return false;
+        }
+
+        public void BindGuestSelection(InvocationMessage invocation, IStackSequence sequence)
+        {
+            if (selectionOrders.Bind(invocation.InvocationID, sequence))
+                Log.Info($"SYNC guest: bound selection to replay {invocation.InvocationID}");
+        }
+
+        public void RecoverSelection(SelectionState selection) => selectionOrders.RejectLocal(selection);
 
         private void CompleteForGuest(CombatGameState combat, Request request)
         {
