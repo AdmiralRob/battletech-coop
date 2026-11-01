@@ -1,0 +1,90 @@
+BATTLETECH CO-OP 0.0.14: MOVEMENT FIX TEST BUILD
+November 1, 2026
+
+STATUS
+Implemented and compiled; automated checks passed. Not yet verified in a running
+two-player game. No deployment to the installed game or modification of saves.
+
+CHANGES
+1. New player movement commands are checked against the host's actor state before
+   execution. An already-moved or finished actor cannot walk, sprint, jump or
+   initiate another melee move. Guest input also performs the same preflight.
+2. AttackInvocation is outside the movement guard. A normal move/jump does not
+   consume firing or end the activation. Ace Pilot movement after firing remains
+   available when the game reports that ability and movement is unspent.
+3. Fixed an asynchronous UI handoff: the guest's original SelectionState is retained
+   until its accepted invocation creates a sequence during replay. AssignOrders
+   lets the game's normal completion handler transition from movement to firing.
+4. Host IDs use G<sender>.<request> so this handoff does not depend on reply timing,
+   other players' orders, or whether earlier requests were rejected.
+5. Rejected selections recover on a subsequent idle update. Recovery does not clear
+   a different unit's selection or a selection already waiting for an accepted move.
+6. Version increased to 0.0.14, so both players must use the same build. Added logs
+   for movement validation and 'bound selection to replay'.
+
+EVIDENCE FOR THE UI FIX
+Read-only inspection of the installed Assembly-CSharp.dll established:
+- SelectionState.PublishInvocation subscribes to InvocationStackSequenceCreated,
+  calls PublishMessage, and immediately unsubscribes. A later network replay
+  therefore cannot reach this temporary subscription.
+- SelectionState.IsComplete remains false when Orders is null.
+- CombatSelectionHandler.RemoveCompletedItems advances a completed movement
+  selection to AddFireState. Without its Orders reference, this path is skipped.
+- OrderSequence.OnAdded sets HasMovedThisRound for movement-consuming sequences.
+  AbstractActor.OnNewRound clears the movement flag. CanMove alone only checks
+  operational/prone state, so it is insufficient to enforce one movement.
+This identifies a concrete code-path defect. A live session is still needed to
+confirm that it explains and resolves all observed symptoms in the supplied logs.
+
+EXECUTED VERIFICATION
+Repository handoff: both headless suites were rerun from the GitHub checkout on
+November 1, 2026. MovementTests.txt records 44/44 passing; NetTests.txt records
+12/12 passing. The movement transcript also retains a harmless PowerShell
+filesystem-provider startup warning from the restricted environment.
+
+- Complete mod compiled successfully using Roslyn bundled with PowerShell 7,
+  C# 7.3, desktop assembly binding and copied game/Mono references. Final build
+  has no compiler errors or warnings (one pre-existing unused-using hidden diagnostic).
+- MovementTests: 44/44 passed. Compiles production movement validation, pending
+  selection handling and routing patches against minimal game/UI data doubles.
+  Covers the three-move log pattern; move/jump then fire; cross-type extra moves;
+  completed turns; Ace Pilot; melee/DFA; per-unit and per-round state; free-movement
+  round reset; host/guest routing; replay bypass; delayed and out-of-order binding;
+  duplicate clicks; rejection recovery; changed selection; and offline behavior.
+- NetTests: 12/12 passed with loopback socket access. The initial restricted run
+  could not access local sockets (11 failures/timeouts, 1 pass); the permitted
+  run passed every existing network test. Network core source was unchanged.
+
+LIMITS
+The tests do not run Unity, install Harmony patches into a live game, animate a
+Mech, or drive the real HUD. They do not prove the complete gameplay sequence.
+Attack eligibility, path legality, range and targeting rules remain the game's
+responsibility; this is a movement guard, not a complete command validator.
+Mod packs with alternative action rules remain unverified.
+
+REPRODUCING CHECKS
+From the working source directory, with a .NET 8 SDK:
+  dotnet run --project tests/MovementTests
+  dotnet run --project tests/NetTests
+PowerShell 7 fallback (fresh process for each suite):
+  ./tools/run-headless-tests.ps1 -Suite MovementTests
+  ./tools/run-headless-tests.ps1 -Suite NetTests
+Offline build using copies of required game libraries in ignored local/Managed:
+  ./tools/build-local.ps1
+Normal SDK build remains available using GameDir.props and the existing csproj.
+
+TWO-PLAYER ACCEPTANCE CHECKS -- STILL TO RUN
+Use separate test copies, the same 0.0.14 files on both PCs, and disposable saves.
+1. Guest: walk once, verify controls transition to firing, fire once, finish turn.
+2. Try a second walk, sprint and jump after walking. No extra movement; firing
+   remains available. Repeat with host control and with each player selecting the
+   same Mech before the first command completes.
+3. Jump then fire; stand then move/fire; first-action melee/DFA; sprint then end;
+   reserve; normal movement on the next round; move each other Mech independently.
+4. Ace Pilot: fire then move/jump once. No second movement or second melee attack.
+5. Travel before enemy contact, transition into combat, and return to free movement.
+6. Rapid duplicate clicks, switch units while waiting, and a deliberately stale
+   guest request. Controls must recover without losing another selected unit.
+7. Repeat across a second mission; inspect both logs for DESYNC, stuck activations,
+   or missing 'bound selection to replay G...' after guest HUD commands.
+Record time, actor, chosen actions and both logs for any failure.

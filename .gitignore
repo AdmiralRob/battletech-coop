@@ -6,3 +6,14 @@ GameDir.props
 local/
 ca/
 dist/
+
+# Local game libraries, installation bundles, saves and credentials stay local.
+*.dll
+*.exe
+*.zip
+*.sav
+*.log
+.env
+.env.*
+!.env.example
+TestResults/**/package/

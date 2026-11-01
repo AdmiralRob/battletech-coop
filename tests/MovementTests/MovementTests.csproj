@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/BattletechCoop/Sync/MovementOrderGuard.cs" Link="MovementOrderGuard.cs" />
+    <Compile Include="../../src/BattletechCoop/Patches/InvocationLogPatch.cs" Link="InvocationLogPatch.cs" />
+    <Compile Include="../../src/BattletechCoop/Sync/PendingSelectionOrders.cs" Link="PendingSelectionOrders.cs" />
+    <Compile Include="../../src/BattletechCoop/Patches/GuestSelectionOrderPatch.cs" Link="GuestSelectionOrderPatch.cs" />
+  </ItemGroup>
+</Project>

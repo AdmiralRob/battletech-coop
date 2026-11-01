@@ -1,0 +1,60 @@
+BATTLETECH CO-OP: SHARED DEVELOPMENT HANDOFF
+Prepared November 1, 2026
+Repository: https://github.com/AdmiralRob/battletech-coop
+Change branch: codex/0.0.14-movement-fix
+Base commit: 49b1a37ea72662cee4301e787e8bcd6dbb91ce14 (original 0.0.13)
+
+CURRENT CHANGE
+Version 0.0.14 is a test build for repeated player movement. The host validates
+movement using the actor's game-owned movement/activation state. Normal attack
+orders pass through the movement guard, preserving movement followed by firing.
+The guest also retains the originating SelectionState until its matching replay
+creates an order sequence. AssignOrders allows the game's own completion handler
+to advance to firing. Rejected selections recover on a later idle update.
+
+MAIN FILES
+src/BattletechCoop/Sync/MovementOrderGuard.cs
+src/BattletechCoop/Sync/PendingSelectionOrders.cs
+src/BattletechCoop/Sync/CombatSync.cs
+src/BattletechCoop/Patches/GuestSelectionOrderPatch.cs
+src/BattletechCoop/Patches/InvocationLogPatch.cs
+tests/MovementTests/
+TestResults/2026-11-01-movement-fix/REPORT.txt
+
+EVIDENCE
+The supplied host and guest logs showed the same actor receiving three distinct
+movement orders in activation 19 of combat 1538836484 (seq 47-49), then attacking
+at seq 50. Requests had different IDs, so this was not a simple duplicate packet.
+Game assembly inspection also showed that the original selection subscribes to
+sequence creation only during a synchronous call; the network reply arrives later.
+Raw logs contain player identifiers and local machine paths and are kept locally.
+
+VERIFIED AND PENDING
+Full mod compilation: passed against locally copied game libraries.
+Movement/control checks: 44/44 passed using production guard, correlation and
+routing code with lightweight game/UI doubles. Network regression: 12/12 passed.
+These results do not establish live UI, animation or multiplayer gameplay success.
+Next step: run the report's two-player checklist, including move-fire, repeated
+move rejection, jump-fire, Ace Pilot, reserve, new rounds and concurrent control.
+
+WORKING TOGETHER
+Use this repository and a named commit as the shared source reference. Fetch
+before starting, use a separate topic branch for each change, and compare with
+the current main branch before opening a pull request. Coordinate overlapping
+edits through the humans and review the existing changes before replacing them.
+Keep executed test results separate from assumptions and pending gameplay checks.
+Use game/test copies and disposable saves. Do not commit game assemblies, saves,
+credentials or private machine configuration; retain the original MIT license.
+Record the tested commit and matching mod version when sharing a build.
+
+BUILD AND TEST
+SDK: dotnet build src/BattletechCoop -c Release, after configuring GameDir.props.
+Headless: dotnet run --project tests/MovementTests
+          dotnet run --project tests/NetTests
+PowerShell 7 fallback: tools/run-headless-tests.ps1 -Suite MovementTests or NetTests
+(run each in a fresh process). The network suite needs loopback socket access.
+Offline compiler fallback: tools/build-local.ps1 uses PowerShell 7's Roslyn and
+required game DLL copies in ignored local/Managed, writing to ignored local/build.
+
+The GitHub connection used here is AKHCASE. Claude's access is configured by Rob
+in his own environment; this handoff does not claim that connection is established.
