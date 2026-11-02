@@ -124,6 +124,19 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
+Live company updates (0.0.16)
+-----------------------------
+The friend's view of the host's company now keeps up without reloading. As the host passes
+time, the friend sees the day, C-Bills, morale, inventory, pilot XP and injuries change, and
+refits and healing finish on the same day as on the host. Event results that change those
+numbers show up within a second.
+After a mission, the friend's ship now includes the mission's C-Bills and pilot XP (before, it
+arrived just before they were paid, so the host's pilot training could not be shown).
+If the friend's copy ever stops matching the host's (for example an event that adds a mech, or
+arriving in a new star system), it catches up with a fresh ship by itself, waiting until the
+friend closes the MechLab or confirms pilot training. This happens at most once every 5 minutes;
+otherwise use "Refresh the host's ship".
+
 Known limits: no saving or loading during co-op combat; if someone disconnects mid-battle, the
 battle cannot be resumed together.
 

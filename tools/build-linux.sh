@@ -7,7 +7,7 @@
 #
 # Usage: tools/build-linux.sh [--install] [--tests]
 #   --install  apt-get the .NET 8 SDK and mono-devel first (needs root)
-#   --tests    also run tests/MovementTests, tests/SettingsTests and tests/NetTests
+#   --tests    also run the headless suites (Movement, Settings, CompanyLive, Net)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,7 +37,7 @@ dotnet build src/BattletechCoop -c Release --source "$feed" \
   -p:FrameworkPathOverride="$refs" -p:AutomaticallyUseReferenceAssemblyPackages=false
 
 if [ "$tests" = 1 ]; then
-  for t in MovementTests SettingsTests NetTests; do
+  for t in MovementTests SettingsTests CompanyLiveTests NetTests; do
     dotnet restore "tests/$t" --source "$feed" >/dev/null
     dotnet run --no-restore --project "tests/$t"
   done

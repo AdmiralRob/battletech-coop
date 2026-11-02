@@ -39,7 +39,8 @@ Two players (later 3–4) play one BattleTech Career together.
 | Branch | Pair | Status |
 |---|---|---|
 | `codex/0.0.14-movement-fix` | Morgan + ChatGPT | Merged (PR #1); in live testing |
-| `feature/settings-sync` | Rob + Claude | Host's combat pacing settings apply on the guest |
+| `feature/settings-sync` | Rob + Claude | PR #2: host's combat pacing settings apply on the guest |
+| `feature/live-company` | Rob + Claude | Guest's copy of the company keeps up live (builds on PR #2) |
 | `feature/ship-navigation` | Morgan + ChatGPT (proposed) | Design in Morgan's proposal |
 | `feature/split-lance-2x2` | TBD | After the movement fix is confirmed live |
 
@@ -54,7 +55,8 @@ dispatched explicitly.
 | 29–31 | Ship navigation |
 | 32–34 | Lance ownership |
 | 35 | Settings sync (`SettingsSync.Channel`) |
-| 36–39 | Spare; claim here before use |
+| 36 | Live company updates (`CompanyLive.Channel`) |
+| 37–39 | Spare; claim here before use |
 
 ## Phases
 
@@ -143,6 +145,55 @@ Design (`Sync/SettingsSync.cs`):
 - **The guest's own values return** when the session closes.
 - **Regression tests:** `tests/SettingsTests` compiles the real `SettingsSync.cs` against
   stand-ins that follow the game's save order.
+
+## Feature: live company updates (2026-11-01)
+
+**Problem:** the guest saw the host's company as of the last full ship. Day, C-Bills, XP and
+finished refits only showed up after a mission or a manual refresh. Logs from 2026-11-01
+showed two causes:
+
+1. **The post-mission ship was sent too early.** It went out when combat ended, but
+   `SimGameState.ResolveCompleteContract` (C-Bills, pilot XP, reputation, morale, salvage) runs
+   later from `SimGameState.Update`. `OnCompleteContract` sets `CompletedContract`, and
+   `ResolveCompleteContract` clears it. Every host pilot-training update then failed on the
+   guest ("needs 1300 XP, the pilot has 500").
+2. **Nothing sent time passing, events or travel.**
+
+Rob's decisions:
+- Live updates, with no routine reloads.
+- A reload that is needed waits until the guest isn't editing.
+
+Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
+
+- **Snapshot timing:** `ShipView` holds the ship while `CompletedContract != null`.
+- **Each day:** the host records the work-queue steps `OnDayPassed` ran, in order
+  (`UpdateMechLabWorkQueue(passDay)`, `UpdateInjuries()`). The guest replays them with
+  `ShipRequests.RunAsRemote`, so nothing is sent back. They depend only on the queues and the
+  MechTech/MedTech skills, so refits finish and pilots heal on the same day on both copies.
+- **Every change** (each day, plus a once-a-second fingerprint check on the host): the company's
+  and each pilot's stats that changed since the last ship or status, set on the guest with
+  `StatCollection.Set` / `AddStatistic` / `RemoveStatistic`, plus `DaysPassed` and
+  `DayRemainingInQuarter`. The guest redraws with `SGRoomManager.RefreshDay` /
+  `RefreshTimeline` / `RefreshDisplay` and the existing screen redraw.
+- **Fingerprint:** days, all company and pilot stats, roster, bays, and both queues (no
+  work-order IDs, which differ between copies).
+  - On a mismatch, the guest logs its copy and catches up with a fresh ship
+    (`ShipRequests.WantHeal`).
+  - The catch-up waits for `GuestEditing()` (MechLab open, or unconfirmed training).
+  - At most one automatic catch-up per received ship and per 5 minutes.
+  - The check is skipped while a guest request is unanswered (`PendingRequests`).
+- **Also:**
+  - When an ordinary host update can't apply, the guest now catches up the same way instead
+    of only showing a notice.
+  - Statuses wait on the guest while its ship loads or the player is editing, and a new ship
+    clears them.
+  - The host doesn't send statuses while a ship is pending (`ShipView.SnapshotPending`).
+- **Not live yet** (caught by the fingerprint, then a catch-up):
+  - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
+  - arriving in a new system (its store, hiring hall and contracts are generated on the host);
+  - Argo upgrade construction.
+- **Tests:** `tests/CompanyLiveTests` covers the deltas and wire format. The `StatCollection`
+  apply path and the `OnDayPassed` patch target were checked against the real game DLL.
 
 ## Open questions
 

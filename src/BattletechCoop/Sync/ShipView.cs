@@ -58,6 +58,10 @@ namespace BattletechCoop.Sync
             ShipRequests.Reset();
         }
 
+        // Host: a full ship is waiting to go out (e.g. after a mission, until its rewards are
+        // in). Live company updates hold off until it has: it supersedes them.
+        internal static bool SnapshotPending => dirty;
+
         // Something the guest should see changed (or the guest asked).
         public static void MarkDirty(string why)
         {
@@ -85,6 +89,12 @@ namespace BattletechCoop.Sync
             if (session.Players.Count(p => p.Index != 0) == 0) return;
             if (!urgent && DateTime.UtcNow - lastSent < MinInterval) return;
             if (!game.Simulation.CanSave(SaveReason.MANUAL, false)) return;
+            // After a mission the ship is up before the rewards are in: OnCompleteContract sets
+            // CompletedContract, and SimGameState.Update calls ResolveCompleteContract (C-Bills,
+            // pilot XP, reputation, morale, salvage; it clears CompletedContract) only once no
+            // popup is open. A ship sent before that is missing them, and later pilot training
+            // updates fail on the guest for lack of XP (seen 2026-11-01).
+            if (game.Simulation.CompletedContract != null) return;
 
             dirty = false;
             urgent = false;
@@ -96,6 +106,7 @@ namespace BattletechCoop.Sync
                 var company = game.Simulation.CompanyName ?? "";
                 session.SendGame(ChannelShipSave, Build(w => { w.Write(company); w.Write(bytes.Length); w.Write(bytes); }));
                 SentAt = UnityEngine.Time.realtimeSinceStartup;
+                CompanyLive.ShipSent(game.Simulation);
                 Log.Info($"SHIP host: sent {Summary(game.Simulation)} ({bytes.Length} bytes, {started.ElapsedMilliseconds} ms)");
             }
             catch (Exception e)
@@ -166,6 +177,7 @@ namespace BattletechCoop.Sync
                     pendingLoad = r.ReadBytes(r.ReadInt32());
                     Log.Info($"SHIP guest: received the host's ship '{GuestCompany}' ({pendingLoad.Length} bytes)");
                     ShipRequests.ShipSaveReceived();
+                    CompanyLive.ShipSaveReceived();
                     refreshReceived = true;
                     ShipRequests.ShowNotice("Loading the host's ship...", 60f);
                 }

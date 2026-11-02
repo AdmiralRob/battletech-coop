@@ -225,6 +225,7 @@ namespace BattletechCoop
             Sync.CombatSync.ResetForSessionEnd();
             Sync.ShipView.Reset();
             Sync.SettingsSync.Reset();
+            Sync.CompanyLive.Reset();
             // A guest left inside the host's battle or campaign would keep playing a copy that
             // can't affect anything ("ghost campaign"): go back to the main menu shortly after.
             if (session.Role == SessionRole.Guest && Sync.CombatSync.GuestInHostGame && !Sync.AutoSkirmish.MainMenuShowing)
@@ -274,6 +275,11 @@ namespace BattletechCoop
             if (channel == Sync.SettingsSync.Channel)
             {
                 Sync.SettingsSync.HandleGameMessage(Session, sender, payload);
+                return;
+            }
+            if (channel == Sync.CompanyLive.Channel)
+            {
+                Sync.CompanyLive.HandleGameMessage(Session, sender, payload);
                 return;
             }
             if (channel >= Sync.CombatSync.ChannelCombatStart)
@@ -354,6 +360,7 @@ namespace BattletechCoop
                 Sync.ShipRequests.Update();
                 Sync.MissionStart.Update();
                 Sync.SettingsSync.Update();
+                Sync.CompanyLive.Update(Session);
                 Sync.CombatSync.UpdateIdleGuest(Session);
                 UpdateTestModes();
             }
