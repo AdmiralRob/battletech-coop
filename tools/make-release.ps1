@@ -110,6 +110,20 @@ Shared ship (0.0.9; two-way updates 0.0.10; Store, Hiring Hall and more 0.0.12)
    seconds, and a notice at the top says when it is done.
 5. When the host launches a mission, the friend's game follows as before.
 
+Movement fix (0.0.14)
+---------------------
+A mech can no longer move, jump, melee or DFA again after it has moved this activation, and the
+friend's controls switch from moving to firing as in single-player. A refused order shows a
+notice at the top of the screen.
+
+Shared combat pacing (0.0.15)
+-----------------------------
+While connected, the friend's game uses the host's combat pacing and cinematic settings
+(Options > Game: speed up combat, attack and target cams, follow cams, zoom and cinematic
+chances), so both screens play out the same way. Camera speeds and other personal settings are
+unchanged. The friend's own settings are never overwritten: they come back when the session
+ends, and any change the friend makes while connected is kept for afterwards.
+
 Known limits: no saving or loading during co-op combat; if someone disconnects mid-battle, the
 battle cannot be resumed together.
 
