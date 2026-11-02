@@ -243,6 +243,7 @@ namespace BattletechCoop.Sync
         public static void ShipSaveReceived()
         {
             Inbox.Clear();
+            CompanyLive.ShipSaveReceived();
             healWanted = false;
             healAskedForThisShip = false;
         }

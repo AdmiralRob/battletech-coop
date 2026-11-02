@@ -46,8 +46,11 @@ namespace BattletechCoop.Sync
         private static readonly List<byte> heldOps = new List<byte>();
         private static string heldWhy;
 
+        private static uint baseMarket; // host: market hash the guests have
+
         // Guest: statuses wait in ShipRequests.Inbox, in order with ordinary ship updates.
         private static bool replaying;
+        private static MarketData pendingMarket; // waits for this copy's own shop loading
 
         public static void Reset()
         {
@@ -57,7 +60,11 @@ namespace BattletechCoop.Sync
             dayOps.Clear();
             heldOps.Clear();
             heldWhy = null;
+            pendingMarket = null;
         }
+
+        // A new full ship supersedes a market still waiting here.
+        internal static void ShipSaveReceived() => pendingMarket = null;
 
         private static CoopSession Session => CoopController.Instance?.Session;
 
@@ -122,7 +129,150 @@ namespace BattletechCoop.Sync
                 (sim.MedBayQueue?.SubEntries ?? new List<WorkOrderEntry>())
                     .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"),
                 sim.FinancialReportNotification?.GetRemainingCost() ?? -1,
-                sim.Starmap?.TravelOrder?.GetRemainingCost() ?? -1);
+                sim.Starmap?.TravelOrder?.GetRemainingCost() ?? -1,
+                RouteIds(sim), TravelIndex(sim), MarketLines(sim));
+
+        // ---- Travel route and market ----
+
+        // The route the host is on: the systems of Starmap.ActivePath, and how far along.
+        internal static List<string> RouteIds(SimGameState sim) =>
+            (sim.Starmap?.ActivePath ?? new List<StarSystemNode>()).Select(n => n?.System?.ID ?? "?").ToList();
+
+        internal static int TravelIndex(SimGameState sim) =>
+            sim.Starmap == null ? 0 : Traverse.Create(sim.Starmap).Field("<travelIndex>k__BackingField").GetValue<int>();
+
+        private static Shop[] Shops(SimGameState sim)
+        {
+            var system = sim.CurSystem;
+            return new[] { system?.SystemShop, system?.FactionShop, system?.BlackMarketShop };
+        }
+
+        // Shop.RefreshShop fills the stock asynchronously (IsPending until it's in).
+        private static bool AnyShopPending(SimGameState sim) => Shops(sim).Any(shop => shop != null && shop.IsPending);
+
+        internal static IEnumerable<string> MarketLines(SimGameState sim)
+        {
+            var shops = Shops(sim);
+            for (var i = 0; i < shops.Length; i++)
+            {
+                var shop = shops[i];
+                if (shop == null) { yield return $"shop {i} none"; continue; }
+                yield return $"shop {i} refresh {shop.LastRefreshDay}";
+                foreach (var item in shop.ActiveInventory ?? new List<ShopDefItem>())
+                    yield return $"item {i} {item.ID} {item.Type} {item.Count} {item.IsInfinite} {item.IsDamaged} " +
+                                 item.DiscountModifier.ToString("R", CultureInfo.InvariantCulture);
+            }
+            var system = sim.CurSystem;
+            if (system == null) yield break;
+            yield return $"forhire refresh {system.LastRefreshDay}";
+            foreach (var def in system.AvailablePilots ?? new List<PilotDef>())
+                yield return "forhire " + def?.Description?.Id;
+        }
+
+        private static uint MarketHash(SimGameState sim) => Fnv.Hash(string.Join("\n", MarketLines(sim).ToArray()));
+
+        private static MarketData BuildMarket(SimGameState sim)
+        {
+            var m = new MarketData { SystemId = sim.CurSystem?.ID ?? "" };
+            var shops = Shops(sim);
+            for (var i = 0; i < shops.Length; i++)
+            {
+                if (shops[i] == null) continue;
+                var data = new MarketData.ShopData { LastRefreshDay = shops[i].LastRefreshDay };
+                foreach (var item in shops[i].ActiveInventory ?? new List<ShopDefItem>()) data.Items.Add(item.ToJSON());
+                m.Shops[i] = data;
+            }
+            if (sim.CurSystem != null)
+            {
+                m.PilotsRefreshDay = sim.CurSystem.LastRefreshDay;
+                foreach (var def in sim.CurSystem.AvailablePilots ?? new List<PilotDef>()) m.Pilots.Add(def.ToJSON());
+            }
+            return m;
+        }
+
+        // Guest: the host's stock and pilots for hire, once this copy's shops have finished their
+        // own loading (which would otherwise overwrite them). Returns false while it must wait.
+        private static bool TryApplyMarket(SimGameState sim, MarketData m)
+        {
+            if (sim.CurSystem == null || sim.CurSystem.ID != m.SystemId || AnyShopPending(sim)) return false;
+            var shops = Shops(sim);
+            for (var i = 0; i < shops.Length; i++)
+            {
+                if (shops[i] == null || m.Shops[i] == null) continue;
+                var inventory = shops[i].ActiveInventory;
+                inventory.Clear();
+                foreach (var json in m.Shops[i].Items) { var item = new ShopDefItem(); item.FromJSON(json); inventory.Add(item); }
+                Traverse.Create(shops[i]).Property("LastRefreshDay").SetValue(m.Shops[i].LastRefreshDay);
+            }
+            // As LanceLoader does for the host's pilots in combat: a PilotDef made from JSON needs
+            // this machine's DataManager, its abilities re-linked, and any missing dependencies
+            // (portrait parts...) loaded; the Hiring Hall redraws once they're in.
+            var pilots = sim.CurSystem.AvailablePilots;
+            pilots.Clear();
+            var request = new BattleTech.Data.DataManager.InjectedDependencyLoadRequest(sim.DataManager);
+            foreach (var json in m.Pilots)
+            {
+                var def = new PilotDef();
+                def.FromJSON(json);
+                def.DataManager = sim.DataManager;
+                def.ForceRefreshAbilityDefs();
+                if (!def.DependenciesLoaded(1000)) def.GatherDependencies(sim.DataManager, request, 1000);
+                pilots.Add(def);
+            }
+            if (request.DependencyCount() > 0)
+            {
+                var defs = pilots.ToList();
+                request.RegisterLoadCompleteCallback(() =>
+                {
+                    foreach (var def in defs) def.ForceRefreshAbilityDefs();
+                    ShipRequests.MarkScreensDirty();
+                });
+                sim.DataManager.InjectDependencyLoader(request, 1000);
+            }
+            Traverse.Create(sim.CurSystem).Property("LastRefreshDay").SetValue(m.PilotsRefreshDay);
+            ShipRequests.MarkScreensDirty();
+            Log.Info($"LIVE guest: store and hiring hall now as the host's in {sim.CurSystem.Name} " +
+                     $"({m.Shops.Where(x => x != null).Sum(x => x.Items.Count)} items, {m.Pilots.Count} pilots)");
+            return true;
+        }
+
+        // Guest: follow the host's route and jumps with the game's own travel steps, so the
+        // guest travels and arrives without a reload.
+        private static void FollowTravel(SimGameState sim, CompanyStatus status)
+        {
+            var starmap = sim.Starmap;
+            if (starmap == null) return;
+            if (status.Route.Count > 0 && !RouteIds(sim).SequenceEqual(status.Route))
+            {
+                // As pressing Go: the route found (PotentialPath) becomes the trip (SetActivePath ->
+                // CreateActivePath: travel order, travel state, timeline). The route comes from
+                // the host instead of this copy's own pathfinding.
+                var nodes = status.Route.Select(id => starmap.GetSystemByID(id)).ToList();
+                if (nodes.Any(n => n == null)) Log.Info("LIVE guest: the host's route has a system this copy doesn't know");
+                else
+                {
+                    Traverse.Create(starmap).Property("PotentialPath").SetValue(nodes);
+                    try { starmap.SetActivePath(); }
+                    catch (NullReferenceException) { } // the starmap's renderer isn't up; the trip is made before it's drawn
+                    Log.Info($"LIVE guest: following the host's route {string.Join(" > ", status.Route.ToArray())}");
+                }
+            }
+            if (!string.IsNullOrEmpty(status.SystemId) && sim.CurSystem?.ID != status.SystemId)
+            {
+                var index = TravelIndex(sim);
+                if (RouteIds(sim).SequenceEqual(status.Route) && index + 1 == status.TravelIndex
+                    && status.TravelIndex < status.Route.Count && status.Route[status.TravelIndex] == status.SystemId)
+                    starmap.IncrementTravelIndexAndUpdateCurrentSystem(); // the host's own jump step
+                else
+                {
+                    var node = starmap.GetSystemByID(status.SystemId);
+                    if (node?.System != null) sim.SetCurrentSystem(node.System, true, false);
+                }
+                Log.Info($"LIVE guest: jumped with the host to {sim.CurSystem?.Name}");
+            }
+            if (status.Route.Count > 0 && TravelIndex(sim) != status.TravelIndex)
+                Traverse.Create(starmap).Field("<travelIndex>k__BackingField").SetValue(status.TravelIndex);
+        }
 
         // The quarterly finance report and the travel order are timeline entries of their own:
         // OnDayPassed pays them (FinancialReportNotification.PayCost, Starmap.PayTravelOrderCost)
@@ -156,6 +306,7 @@ namespace BattletechCoop.Sync
             baseCompany = Snapshot(sim.CompanyStats);
             basePilots = SnapshotPilots(sim);
             baseFingerprint = Fingerprint(sim);
+            baseMarket = AnyShopPending(sim) ? 0u : MarketHash(sim);
             nextCheck = DateTime.UtcNow + CheckInterval;
             heldOps.Clear(); // the ship already has those days
             heldWhy = null;
@@ -163,8 +314,10 @@ namespace BattletechCoop.Sync
 
         // Mid-animation (a jump playing) the travel state is in between; a status taken then would
         // tell the guest to force that in-between state. Wait for the animation to finish.
+        // Likewise, after arriving the new system's shops are still loading (Shop.IsPending).
         private static bool Settled(SimGameState sim) =>
-            sim.TravelState != SimGameTravelStatus.TRANSITION_ANIMATING && sim.TravelState != SimGameTravelStatus.UNKNOWN;
+            sim.TravelState != SimGameTravelStatus.TRANSITION_ANIMATING && sim.TravelState != SimGameTravelStatus.UNKNOWN
+            && !AnyShopPending(sim);
 
         internal static void BeginDay()
         {
@@ -215,14 +368,20 @@ namespace BattletechCoop.Sync
             status.SectionHashes.AddRange(CompanyFingerprint.SectionHashes(sections));
             ReadEntry(sim.FinancialReportNotification, out status.FinanceCost, out status.FinancePaid);
             ReadEntry(sim.Starmap?.TravelOrder, out status.TravelOrderCost, out status.TravelOrderPaid);
+            status.SystemId = sim.CurSystem?.ID ?? "";
+            status.TravelIndex = TravelIndex(sim);
+            status.Route.AddRange(RouteIds(sim));
+            var market = MarketHash(sim);
+            if (market != baseMarket) status.Market = BuildMarket(sim);
             status.Ops.AddRange(ops);
             foreach (var kv in pilots)
             {
                 basePilots.TryGetValue(kv.Key, out var before);
                 status.Pilots[kv.Key] = StatDelta.Between(before, kv.Value);
             }
-            if (!status.HasChanges && status.Fingerprint == baseFingerprint) return;
+            if (!status.HasChanges && status.Fingerprint == baseFingerprint && status.Market == null) return;
             session.SendGame(Channel, status.Encode());
+            baseMarket = market;
             baseCompany = company;
             basePilots = pilots;
             baseFingerprint = status.Fingerprint;
@@ -283,6 +442,7 @@ namespace BattletechCoop.Sync
                     }
                 }
                 finally { replaying = false; }
+                FollowTravel(sim, status);
                 // Travel isn't a company stat: the host's travel state (docked, in transit...) and
                 // time left. ForceTravelState is the state machine's own direct setter (it also
                 // updates the travel-related company stats); the stats below then match the host.
@@ -320,12 +480,17 @@ namespace BattletechCoop.Sync
                 t.Property("DaysPassed").SetValue(status.DaysPassed);
                 t.Property("DayRemainingInQuarter").SetValue(status.DayRemainingInQuarter);
             });
+            if (status.Market != null)
+            {
+                pendingMarket = status.Market;
+                if (TryApplyMarket(sim, pendingMarket)) pendingMarket = null;
+            }
             Redraw(sim);
             Log.Info($"LIVE guest: applied {status.Why}: {status.Ops.Count} queue steps, " +
                      $"{status.Company.Set.Count + status.Company.Removed.Count} company stats, {status.Pilots.Count} pilots");
 
             // Check only when nothing of ours is still on its way to the host or waiting here.
-            if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates) return;
+            if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates || pendingMarket != null) return;
             var sections = FingerprintSections(sim);
             var mine = CompanyFingerprint.Hash(sections);
             if (mine == status.Fingerprint) return;
@@ -384,18 +549,19 @@ namespace BattletechCoop.Sync
                 nextCheck = DateTime.UtcNow + CheckInterval;
                 if (heldWhy == null && Settled(sim) && Fingerprint(sim) != baseFingerprint) Send(sim, "company change", new List<byte>());
             }
-            // Guest: statuses are applied by ShipRequests.ProcessInbox (every frame).
-        }
-
-        // Host: arriving in another star system brings that system's store, hiring hall and
-        // contracts, which the host's game generated. Those come with a full ship; the guest
-        // loads it once it isn't editing (ShipView).
-        internal static void ArrivedInSystem(SimGameState sim, StarSystem system)
-        {
-            var session = Session;
-            if (session == null || session.State != SessionState.Active || session.Role != SessionRole.Host) return;
-            if (!session.Players.Any(p => p.Index != 0) || ShipSim() != sim) return;
-            ShipView.MarkDirty("arrived in " + (system?.Name ?? "a new system"));
+            // Guest: statuses are applied by ShipRequests.ProcessInbox (every frame); a market
+            // waits here for this copy's shops to finish loading.
+            else if (pendingMarket != null)
+            {
+                var guestSim = ShipSim();
+                try { if (guestSim != null && TryApplyMarket(guestSim, pendingMarket)) pendingMarket = null; }
+                catch (Exception e)
+                {
+                    pendingMarket = null;
+                    Log.Error("LIVE guest: could not apply the host's store and hiring hall", e);
+                    ShipRequests.WantHeal("the host's store could not be shown here");
+                }
+            }
         }
 
         internal static bool Replaying => replaying;
@@ -462,15 +628,5 @@ namespace BattletechCoop.Sync
     public static class InjuriesPatch
     {
         static void Prefix() => CompanyLive.RecordOp(CompanyStatus.OpInjuries);
-    }
-
-    [HarmonyPatch(typeof(SimGameState), "SetCurrentSystem")]
-    public static class SetCurrentSystemPatch
-    {
-        static void Postfix(SimGameState __instance, StarSystem system)
-        {
-            try { CompanyLive.ArrivedInSystem(__instance, system); }
-            catch (Exception e) { Log.Error("LIVE: arrival", e); }
-        }
     }
 }

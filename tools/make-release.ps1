@@ -124,8 +124,12 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
-Live company updates (0.0.16; ordering and travel fixes 0.0.17 and 0.0.18)
+Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.20)
 -------------------------------------------------------------------------
+0.0.20: travelling no longer makes the friend's game reload the ship (black screen) when the
+host presses Go, at each jump, or after travel events. The friend's ship follows the host's
+route and jumps, and the Store and Hiring Hall in the new system show the host's stock and
+pilots. The friend's contract list stays empty after a jump (contracts are the host's).
 0.0.19: the schedule's finance report and travel countdowns now tick on the friend's screen
 as they do on the host's, and browsing a room the host hasn't visited no longer makes the
 friend's game reload.
@@ -138,8 +142,8 @@ refits and healing finish on the same day as on the host. Event results that cha
 numbers show up within a second.
 After a mission, the friend's ship now includes the mission's C-Bills and pilot XP (before, it
 arrived just before they were paid, so the host's pilot training could not be shown).
-If the friend's copy ever stops matching the host's (for example an event that adds a mech, or
-arriving in a new star system), it catches up with a fresh ship by itself, waiting until the
+If the friend's copy ever stops matching the host's (for example an event that adds a mech),
+it catches up with a fresh ship by itself, waiting until the
 friend closes the MechLab or confirms pilot training. This happens at most once every 5 minutes;
 otherwise use "Refresh the host's ship".
 

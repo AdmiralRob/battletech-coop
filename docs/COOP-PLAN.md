@@ -229,9 +229,27 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
     (`CompanyFingerprint.IsLocalPresentation`) but still sync from the host. Other
     "viewed"/"seen" stats come from the day simulation and stay checked.
   - *Diagnostics.* The guest logs once per hold why host changes are waiting, and how many.
+- **Live test 2026-11-01 (0.0.19), fixed in 0.0.20:** the guest went to a black screen and
+  reloaded the ship twice per trip, and again after travel events.
+  - *At Go:* the host's `SetActivePath` route and travel order weren't in statuses, so the first
+    day of travel failed the `travel` section and the guest asked for a catch-up.
+  - *At the jump:* the host sent a full ship on `SetCurrentSystem` (a new system's store and
+    hiring hall are generated on the host only).
+  - Now statuses carry the system id, the route (system ids) and the travel index. The guest
+    follows them with the game's own calls: `PotentialPath` + `SetActivePath()` for a new route,
+    `IncrementTravelIndexAndUpdateCurrentSystem()` for the next jump on that route, or
+    `SetCurrentSystem(system, true, false)` otherwise. The arrival full ship is gone.
+  - The market (each shop's `ActiveInventory` and `LastRefreshDay`, the system's
+    `AvailablePilots`) is sent as JSON whenever its hash changes. The guest applies it after its
+    own `RefreshShops` finishes (`Shop.IsPending`) and the system matches; new pilots are linked
+    to the `DataManager` and their dependencies loaded as `LanceLoader` does. The host holds a
+    status while its own shops are pending.
+  - The fingerprint now includes the route and index (`travel`) and a `market` section.
+  - Known gap: after a jump the guest's contract list is empty (`OnSystemExit` →
+    `ResetContracts`; contracts are host-only).
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
-  - arriving in a new system (its store, hiring hall and contracts are generated on the host);
+  - the contract list of a new system;
   - Argo upgrade construction.
 - **Tests:** `tests/CompanyLiveTests` covers the deltas, the wire format, the guest's application
   order (both review scenarios, against a model of the Mech Bay queue) and the fingerprint

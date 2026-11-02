@@ -31,11 +31,13 @@ static class Program
         items.ToDictionary(i => i.Item1, i => i.Item2, StringComparer.Ordinal);
     static List<KeyValuePair<string, string>> Sections(string system = "starsystemdef_Claybrooke", int travelState = 0, int travelTime = 0,
                                                        string[] mechLab = null, int day = 42, Dictionary<string, StatValue> company = null,
-                                                       int financeLeft = 29, int travelOrderLeft = -1) =>
+                                                       int financeLeft = 29, int travelOrderLeft = -1,
+                                                       string[] route = null, int travelIndex = 0, string[] market = null) =>
         CompanyFingerprint.Sections(day, 10, system, travelState, travelTime,
             company ?? Stats(("Funds", StatValue.Of(1000000))),
             new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
-            new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0], financeLeft, travelOrderLeft);
+            new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0], financeLeft, travelOrderLeft,
+            route, travelIndex, market ?? new[] { "shop 0 refresh 11", "item 0 Weapon_Laser_MediumLaser_0-STOCK Weapon 3 False False 1", "forhire refresh 11", "forhire pilot_gen_1" });
     static bool Same(IDictionary<string, StatValue> a, IDictionary<string, StatValue> b) =>
         a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var v) && v.Equals(kv.Value));
 
@@ -294,6 +296,46 @@ static class Program
             Check(back.FinanceCost == 90 && back.FinancePaid == 61 && back.TravelOrderCost == 6 && back.TravelOrderPaid == 1, "entries changed");
             var none = CompanyStatus.Decode(new CompanyStatus().Encode());
             Check(none.FinanceCost == -1 && none.TravelOrderCost == -1, "missing entries not -1");
+        });
+
+        // ---- Live test 2026-11-01 (0.0.19): reloads on Go and at the jump ----
+        Test("live test: host pressed Go (a route) and the guest has none -> differs in 'travel'", () =>
+        {
+            var diff = CompanyFingerprint.Differing(
+                CompanyFingerprint.SectionHashes(Sections(route: new[] { "starsystemdef_Brockway", "starsystemdef_Mithron" })),
+                CompanyFingerprint.SectionHashes(Sections()));
+            Check(diff.Count == 1 && diff[0] == "travel", string.Join(",", diff));
+        });
+
+        Test("live test: same route, guest one jump behind -> differs in 'travel'", () =>
+        {
+            var route = new[] { "starsystemdef_Brockway", "starsystemdef_Mithron", "starsystemdef_Detroit" };
+            Check(CompanyFingerprint.Hash(Sections(route: route, travelIndex: 1)) != CompanyFingerprint.Hash(Sections(route: route, travelIndex: 0)), "index not checked");
+        });
+
+        Test("a store or hiring-hall difference is detected in 'market' only", () =>
+        {
+            var diff = CompanyFingerprint.Differing(
+                CompanyFingerprint.SectionHashes(Sections(market: new[] { "shop 0 refresh 11", "forhire pilot_gen_1" })),
+                CompanyFingerprint.SectionHashes(Sections(market: new[] { "shop 0 refresh 11", "forhire pilot_gen_2" })));
+            Check(diff.Count == 1 && diff[0] == "market", string.Join(",", diff));
+        });
+
+        Test("system, route, travel index and market survive the wire; no market when unchanged", () =>
+        {
+            var m = new MarketData { SystemId = "starsystemdef_Mithron", PilotsRefreshDay = 18 };
+            m.Shops[0] = new MarketData.ShopData { LastRefreshDay = 18 };
+            m.Shops[0].Items.Add("{\"ID\":\"Weapon_Laser_MediumLaser_2-Magna\",\"Count\":3}");
+            m.Shops[2] = new MarketData.ShopData { LastRefreshDay = 15 };            // faction shop (1) missing
+            m.Pilots.Add("{\"Description\":{\"Id\":\"pilot_gen_1\"}}");
+            var s = new CompanyStatus { SystemId = "starsystemdef_Mithron", TravelIndex = 1, Market = m };
+            s.Route.AddRange(new[] { "starsystemdef_Brockway", "starsystemdef_Mithron" });
+            var back = CompanyStatus.Decode(s.Encode());
+            Check(back.SystemId == "starsystemdef_Mithron" && back.TravelIndex == 1 && back.Route.SequenceEqual(s.Route), "travel fields changed");
+            Check(back.Market != null && back.Market.SystemId == m.SystemId && back.Market.Shops[1] == null
+                  && back.Market.Shops[0].Items.SequenceEqual(m.Shops[0].Items) && back.Market.Shops[2].LastRefreshDay == 15
+                  && back.Market.Pilots.SequenceEqual(m.Pilots) && back.Market.PilotsRefreshDay == 18, "market changed on the wire");
+            Check(CompanyStatus.Decode(new CompanyStatus().Encode()).Market == null, "an unchanged market was sent");
         });
 
         Console.WriteLine($"{passed}/{passed + failed} passed");
