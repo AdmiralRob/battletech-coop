@@ -42,6 +42,9 @@ namespace BattletechCoop.Sync
         private static DateTime nextCheck = DateTime.MinValue;
         private static bool inDay;
         private static readonly List<byte> dayOps = new List<byte>();
+        // Days whose status waits for the travel animation to settle (see Settled).
+        private static readonly List<byte> heldOps = new List<byte>();
+        private static string heldWhy;
 
         // Guest: statuses wait in ShipRequests.Inbox, in order with ordinary ship updates.
         private static bool replaying;
@@ -52,6 +55,8 @@ namespace BattletechCoop.Sync
             basePilots = null;
             inDay = false;
             dayOps.Clear();
+            heldOps.Clear();
+            heldWhy = null;
         }
 
         private static CoopSession Session => CoopController.Instance?.Session;
@@ -105,10 +110,10 @@ namespace BattletechCoop.Sync
             Pilots(sim).Where(p => p.GUID != null).GroupBy(p => p.GUID)
                 .ToDictionary(g => g.Key, g => Snapshot(g.First().StatCollection), StringComparer.Ordinal);
 
-        // Everything the two copies must agree on, as text: the same on every PC.
-        internal static string FingerprintText(SimGameState sim) =>
-            CompanyFingerprint.Text(
-                sim.DaysPassed, sim.DayRemainingInQuarter, sim.CurSystem?.ID,
+        // Everything the two copies must agree on, in named sections: the same text on every PC.
+        internal static List<KeyValuePair<string, string>> FingerprintSections(SimGameState sim) =>
+            CompanyFingerprint.Sections(
+                sim.DaysPassed, sim.DayRemainingInQuarter, sim.CurSystem?.ID, (int)sim.TravelState, sim.TravelTime,
                 Snapshot(sim.CompanyStats),
                 Pilots(sim).Select(p => new CompanyFingerprint.PilotEntry { Guid = p.GUID, Callsign = p.Callsign, Stats = Snapshot(p.StatCollection) }),
                 sim.ActiveMechs.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value.GUID} '{kv.Value.Name}'"),
@@ -117,7 +122,7 @@ namespace BattletechCoop.Sync
                 (sim.MedBayQueue?.SubEntries ?? new List<WorkOrderEntry>())
                     .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"));
 
-        internal static uint Fingerprint(SimGameState sim) => Fnv.Hash(FingerprintText(sim));
+        internal static uint Fingerprint(SimGameState sim) => CompanyFingerprint.Hash(FingerprintSections(sim));
 
         // ---- Host ----
 
@@ -128,7 +133,14 @@ namespace BattletechCoop.Sync
             basePilots = SnapshotPilots(sim);
             baseFingerprint = Fingerprint(sim);
             nextCheck = DateTime.UtcNow + CheckInterval;
+            heldOps.Clear(); // the ship already has those days
+            heldWhy = null;
         }
+
+        // Mid-animation (a jump playing) the travel state is in between; a status taken then would
+        // tell the guest to force that in-between state. Wait for the animation to finish.
+        private static bool Settled(SimGameState sim) =>
+            sim.TravelState != SimGameTravelStatus.TRANSITION_ANIMATING && sim.TravelState != SimGameTravelStatus.UNKNOWN;
 
         internal static void BeginDay()
         {
@@ -146,8 +158,18 @@ namespace BattletechCoop.Sync
         {
             if (!inDay) return;
             inDay = false;
-            Send(sim, "day " + sim.DaysPassed, dayOps.ToList());
+            heldOps.AddRange(dayOps);
+            heldWhy = "day " + sim.DaysPassed;
             dayOps.Clear();
+            SendHeld(sim);
+        }
+
+        private static void SendHeld(SimGameState sim)
+        {
+            if (heldWhy == null || !Settled(sim)) return;
+            Send(sim, heldWhy, heldOps.ToList());
+            heldOps.Clear();
+            heldWhy = null;
         }
 
         private static void Send(SimGameState sim, string why, List<byte> ops)
@@ -155,14 +177,18 @@ namespace BattletechCoop.Sync
             if (!HostLive(out var session, out var live) || !ReferenceEquals(live, sim)) return;
             var company = Snapshot(sim.CompanyStats);
             var pilots = SnapshotPilots(sim);
+            var sections = FingerprintSections(sim);
             var status = new CompanyStatus
             {
                 Why = why,
                 DaysPassed = sim.DaysPassed,
                 DayRemainingInQuarter = sim.DayRemainingInQuarter,
+                TravelState = (int)sim.TravelState,
+                TravelTime = sim.TravelTime,
                 Company = StatDelta.Between(baseCompany, company),
-                Fingerprint = Fingerprint(sim),
+                Fingerprint = CompanyFingerprint.Hash(sections),
             };
+            status.SectionHashes.AddRange(CompanyFingerprint.SectionHashes(sections));
             status.Ops.AddRange(ops);
             foreach (var kv in pilots)
             {
@@ -182,8 +208,32 @@ namespace BattletechCoop.Sync
 
         public static void HandleGameMessage(CoopSession session, byte sender, byte[] payload)
         {
+            if (session.Role == SessionRole.Host && sender != 0) { LogGuestReport(session, sender, payload); return; }
             if (session.Role != SessionRole.Guest || sender != 0) return;
             ShipRequests.Receive(GuestInbox.Kind.CompanyStatus, payload);
+        }
+
+        // Host: a guest's copy didn't match after a status. Log this side of the parts that
+        // differ, next to the guest's log of its side, so the cause can be found.
+        private static void LogGuestReport(CoopSession session, byte sender, byte[] payload)
+        {
+            try
+            {
+                string why;
+                var names = new List<string>();
+                using (var r = new System.IO.BinaryReader(new System.IO.MemoryStream(payload)))
+                {
+                    why = r.ReadString();
+                    var n = r.ReadByte();
+                    for (var i = 0; i < n; i++) names.Add(r.ReadString());
+                }
+                var sim = ShipSim();
+                Log.Info($"LIVE host: player {sender}'s copy differs after {why} in {string.Join(", ", names.ToArray())}; host copy now:");
+                if (sim == null) return;
+                foreach (var section in FingerprintSections(sim).Where(kv => names.Contains(kv.Key)))
+                    foreach (var line in section.Value.Split('\n').Where(l => l.Length > 0)) Log.Info($"LIVE host fp {section.Key}: {line}");
+            }
+            catch (Exception e) { Log.Error("LIVE host: could not read a guest's mismatch report", e); }
         }
 
         // Called by ShipRequests.ProcessInbox, in the order the host sent it.
@@ -207,6 +257,17 @@ namespace BattletechCoop.Sync
                     }
                 }
                 finally { replaying = false; }
+                // Travel isn't a company stat: the host's travel state (docked, in transit...) and
+                // time left. ForceTravelState is the state machine's own direct setter (it also
+                // updates the travel-related company stats); the stats below then match the host.
+                var travel = (SimGameTravelStatus)status.TravelState;
+                if ((int)sim.TravelState != status.TravelState && sim.TravelManager != null
+                    && travel != SimGameTravelStatus.TRANSITION_ANIMATING && travel != SimGameTravelStatus.UNKNOWN)
+                {
+                    Log.Info($"LIVE guest: travel {sim.TravelState} -> {(SimGameTravelStatus)status.TravelState}");
+                    sim.TravelManager.ForceTravelState(travel);
+                }
+                if (sim.TravelTime != status.TravelTime) sim.SetTravelTime(status.TravelTime, "coop");
                 StatApply.Apply(sim.CompanyStats, status.Company);
                 foreach (var kv in status.Pilots)
                 {
@@ -224,13 +285,31 @@ namespace BattletechCoop.Sync
 
             // Check only when nothing of ours is still on its way to the host or waiting here.
             if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates) return;
-            var text = FingerprintText(sim);
-            var mine = Fnv.Hash(text);
+            var sections = FingerprintSections(sim);
+            var mine = CompanyFingerprint.Hash(sections);
             if (mine == status.Fingerprint) return;
-            Log.Info($"LIVE guest: company differs from the host's after {status.Why} (host {status.Fingerprint:x8}, " +
-                     $"here {mine:x8}{(missing.Count > 0 ? ", missing pilots " + string.Join(",", missing.ToArray()) : "")}); this copy:");
-            foreach (var line in text.Split('\n').Where(l => l.Length > 0 && !l.StartsWith("c Item.") && !l.StartsWith("p "))) Log.Info("LIVE guest fp: " + line);
+            var differing = CompanyFingerprint.Differing(status.SectionHashes, CompanyFingerprint.SectionHashes(sections));
+            Log.Info($"LIVE guest: company differs from the host's after {status.Why} in {string.Join(", ", differing.ToArray())} " +
+                     $"(host {status.Fingerprint:x8}, here {mine:x8}{(missing.Count > 0 ? ", missing pilots " + string.Join(",", missing.ToArray()) : "")}); this copy:");
+            foreach (var section in sections.Where(kv => differing.Contains(kv.Key)))
+                foreach (var line in section.Value.Split('\n').Where(l => l.Length > 0)) Log.Info($"LIVE guest fp {section.Key}: {line}");
+            ReportMismatch(status.Why, differing);
             ShipRequests.WantHeal("company changed on the host after " + status.Why);
+        }
+
+        private static void ReportMismatch(string why, List<string> sections)
+        {
+            var session = Session;
+            if (session == null || session.Role != SessionRole.Guest || !session.IsOpen) return;
+            using (var ms = new System.IO.MemoryStream())
+            using (var w = new System.IO.BinaryWriter(ms))
+            {
+                w.Write(why ?? "");
+                w.Write((byte)sections.Count);
+                foreach (var name in sections) w.Write(name);
+                w.Flush();
+                session.SendGame(Channel, ms.ToArray());
+            }
         }
 
         private static void Redraw(SimGameState sim)
@@ -243,6 +322,7 @@ namespace BattletechCoop.Sync
                     rooms.RefreshDay();
                     rooms.RefreshTimeline(true);
                     rooms.RefreshDisplay();
+                    rooms.RefreshLeftNavFromShipScreen(); // the Store etc. depend on the travel state
                 }
             }
             catch (Exception e) { Log.Error("LIVE guest: could not redraw the ship screen", e); }
@@ -257,9 +337,11 @@ namespace BattletechCoop.Sync
             if (session.Role == SessionRole.Host)
             {
                 inDay = false; // OnDayPassed threw before its postfix: never record across frames
+                if (!HostLive(out _, out var sim)) return;
+                SendHeld(sim);
                 if (DateTime.UtcNow < nextCheck) return;
                 nextCheck = DateTime.UtcNow + CheckInterval;
-                if (HostLive(out _, out var sim) && Fingerprint(sim) != baseFingerprint) Send(sim, "company change", new List<byte>());
+                if (heldWhy == null && Settled(sim) && Fingerprint(sim) != baseFingerprint) Send(sim, "company change", new List<byte>());
             }
             // Guest: statuses are applied by ShipRequests.ProcessInbox (every frame).
         }

@@ -197,6 +197,24 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
 - **Travel** (PR #3 review): the current system is part of the fingerprint. The host sends a fresh
   ship on `SimGameState.SetCurrentSystem`, since the new system's store, hiring hall and
   contracts come from the host. On the guest, a ship it didn't ask for waits while it's editing.
+- **Live test 2026-11-01 (0.0.17), fixed in 0.0.18:**
+  - *Guest stuck "in space" after the host docked.* `SetCurrentSystem` fires at the jump point;
+    docking at the planet days later is only a travel-state change (`SGTravelManager`:
+    `IN_SYSTEM`, `TRANSIT_FROM_JUMP`...), which wasn't synced or fingerprinted.
+    - Statuses now carry `TravelState` and `TravelTime`. The guest applies them with the state
+      machine's own `ForceTravelState` and `SetTravelTime`, then `RefreshLeftNavFromShipScreen`
+      (Store access), with no reload.
+    - The fingerprint has a `travel` section.
+    - The host holds a status while a jump animation plays (`TRANSITION_ANIMATING`), keeping
+      its days.
+  - *A cancelled order stayed on the other player's schedule.* The Mech Bay's own cancel
+    (`MechBayMechInfoWidget.ConfirmCancelWorkOrder`) follows `CancelWorkOrder` with
+    `UpdateMechLabWorkQueue(false)` and `RefreshTimeline`. The remote cancel now does the same.
+  - *An unexplained catch-up after storing a 'Mech.* The fingerprint is now in named sections
+    (day, system, travel, company, pilots, bays, mechlab, medbay) with a hash each.
+    - On a mismatch, the guest logs the differing sections in full and reports their names to
+      the host (channel 36, guest → host).
+    - The host logs its own copy of those sections.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - arriving in a new system (its store, hiring hall and contracts are generated on the host);

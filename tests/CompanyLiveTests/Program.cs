@@ -29,6 +29,12 @@ static class Program
     }
     static Dictionary<string, StatValue> Stats(params (string, StatValue)[] items) =>
         items.ToDictionary(i => i.Item1, i => i.Item2, StringComparer.Ordinal);
+    static List<KeyValuePair<string, string>> Sections(string system = "starsystemdef_Claybrooke", int travelState = 0, int travelTime = 0,
+                                                       string[] mechLab = null, int day = 42) =>
+        CompanyFingerprint.Sections(day, 10, system, travelState, travelTime,
+            Stats(("Funds", StatValue.Of(1000000))),
+            new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
+            new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0]);
     static bool Same(IDictionary<string, StatValue> a, IDictionary<string, StatValue> b) =>
         a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var v) && v.Equals(kv.Value));
 
@@ -196,9 +202,7 @@ static class Program
         // ---- Fingerprint (CompanyFingerprint), from the PR #3 review ----
         Test("review repro: systems differ while everything else matches -> fingerprints differ", () =>
         {
-            Func<string, uint> fp = system => Fnv.Hash(CompanyFingerprint.Text(42, 10, system, day1,
-                new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
-                new[] { "0 mech1 'Blackjack'" }, new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0]));
+            Func<string, uint> fp = system => CompanyFingerprint.Hash(Sections(system: system));
             Check(fp("starsystemdef_Claybrooke") == fp("starsystemdef_Claybrooke"), "same state, different fingerprints");
             Check(fp("starsystemdef_Claybrooke") != fp("starsystemdef_Detroit"), "a guest left in the previous system matches the host");
             Check(fp(null) != fp("starsystemdef_Claybrooke"), "no system matches a system");
@@ -209,11 +213,40 @@ static class Program
             var a = new CompanyFingerprint.PilotEntry { Guid = "A", Callsign = "a", Stats = Stats(("x", StatValue.Of(1)), ("y", StatValue.Of(2))) };
             var b = new CompanyFingerprint.PilotEntry { Guid = "B", Callsign = "b", Stats = Stats(("y", StatValue.Of(2)), ("x", StatValue.Of(1))) };
             var none = new string[0];
-            var t1 = CompanyFingerprint.Text(1, 1, "s", day1, new[] { a, b }, none, none, none);
-            var t2 = CompanyFingerprint.Text(1, 1, "s", day1, new[] { b, a }, none, none, none);
-            Check(t1 == t2, "order changed the fingerprint");
+            Func<CompanyFingerprint.PilotEntry[], string> text = ps => CompanyFingerprint.Text(CompanyFingerprint.Sections(1, 1, "s", 0, 0, day1, ps, none, none, none));
+            var t1 = text(new[] { a, b });
+            Check(t1 == text(new[] { b, a }), "order changed the fingerprint");
             b.Stats["x"] = StatValue.Of(9);
-            Check(CompanyFingerprint.Text(1, 1, "s", day1, new[] { a, b }, none, none, none) != t1, "a pilot stat change was missed");
+            Check(text(new[] { a, b }) != t1, "a pilot stat change was missed");
+        });
+
+        // ---- Live test 2026-11-01: guest still "in space" after the host docked ----
+        Test("live test: docked vs still in transit -> fingerprints differ, in 'travel' only", () =>
+        {
+            var host = Sections(travelState: 0 /* IN_SYSTEM */, travelTime: 0);
+            var guest = Sections(travelState: 4 /* TRANSIT_FROM_JUMP */, travelTime: 4);
+            Check(CompanyFingerprint.Hash(host) != CompanyFingerprint.Hash(guest), "a guest still in transit matches a docked host");
+            var diff = CompanyFingerprint.Differing(CompanyFingerprint.SectionHashes(host), CompanyFingerprint.SectionHashes(guest));
+            Check(diff.Count == 1 && diff[0] == "travel", "wrong sections: " + string.Join(",", diff));
+        });
+
+        Test("mismatch report names exactly the sections that differ", () =>
+        {
+            var a = Sections();
+            var b = Sections(mechLab: new[] { "WorkOrderEntry_MechLab mech1 2" }, day: 43);
+            var diff = CompanyFingerprint.Differing(CompanyFingerprint.SectionHashes(a), CompanyFingerprint.SectionHashes(b));
+            Check(string.Join(",", diff) == "day,mechlab", string.Join(",", diff));
+            Check(CompanyFingerprint.Differing(new List<uint> { 1, 2 }, CompanyFingerprint.SectionHashes(a)).Count == CompanyFingerprint.SectionNames.Length,
+                  "an older host's status without section hashes should list every section");
+        });
+
+        Test("travel state, travel time and section hashes survive the wire", () =>
+        {
+            var s = new CompanyStatus { TravelState = 4, TravelTime = 3 };
+            s.SectionHashes.AddRange(CompanyFingerprint.SectionHashes(Sections()));
+            var back = CompanyStatus.Decode(s.Encode());
+            Check(back.TravelState == 4 && back.TravelTime == 3 && back.SectionHashes.SequenceEqual(s.SectionHashes), "travel or section hashes changed");
+            Check(back.SectionHashes.Count == CompanyFingerprint.SectionNames.Length, "one hash per section");
         });
 
         Console.WriteLine($"{passed}/{passed + failed} passed");

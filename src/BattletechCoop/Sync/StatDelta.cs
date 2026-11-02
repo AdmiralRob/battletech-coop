@@ -114,6 +114,8 @@ namespace BattletechCoop.Sync
         public string Why = "";
         public readonly List<byte> Ops = new List<byte>();
         public int DaysPassed, DayRemainingInQuarter;
+        public int TravelState, TravelTime;
+        public readonly List<uint> SectionHashes = new List<uint>();
         public StatDelta Company = new StatDelta();
         public readonly SortedDictionary<string, StatDelta> Pilots = new SortedDictionary<string, StatDelta>(StringComparer.Ordinal);
         public uint Fingerprint;
@@ -135,6 +137,10 @@ namespace BattletechCoop.Sync
                 w.Write(changed.Count);
                 foreach (var kv in changed) { w.Write(kv.Key); kv.Value.Write(w); }
                 w.Write(Fingerprint);
+                w.Write(TravelState);
+                w.Write(TravelTime);
+                w.Write((byte)SectionHashes.Count);
+                foreach (var h in SectionHashes) w.Write(h);
                 w.Flush();
                 return ms.ToArray();
             }
@@ -153,13 +159,19 @@ namespace BattletechCoop.Sync
                 var pilots = r.ReadInt32();
                 for (var i = 0; i < pilots; i++) { var guid = r.ReadString(); s.Pilots[guid] = StatDelta.Read(r); }
                 s.Fingerprint = r.ReadUInt32();
+                s.TravelState = r.ReadInt32();
+                s.TravelTime = r.ReadInt32();
+                var sections = r.ReadByte();
+                for (var i = 0; i < sections; i++) s.SectionHashes.Add(r.ReadUInt32());
                 return s;
             }
         }
     }
 
     // Everything the host's and the guest's copies of the company must agree on, as text that is
-    // the same on every PC. CompanyLive gathers the parts from the game; this only lays them out.
+    // the same on every PC, in named sections. CompanyLive gathers the parts from the game; this
+    // only lays them out. A status carries a hash per section, so when the copies differ both
+    // sides can log exactly the part that differs.
     internal static class CompanyFingerprint
     {
         internal sealed class PilotEntry
@@ -168,28 +180,54 @@ namespace BattletechCoop.Sync
             public IDictionary<string, StatValue> Stats;
         }
 
-        // systemId: the current star system's ID. It is stored apart from the company's stats
-        // (SimGameState.CurSystem, set by SetCurrentSystem), so without it a guest still in the
-        // previous system could match after a jump (PR #3 review).
-        public static string Text(int daysPassed, int dayRemainingInQuarter, string systemId,
-                                  IDictionary<string, StatValue> company, IEnumerable<PilotEntry> pilots,
-                                  IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay)
+        public static readonly string[] SectionNames = { "day", "system", "travel", "company", "pilots", "bays", "mechlab", "medbay" };
+
+        // systemId: the current star system, kept apart from the company's stats (CurSystem).
+        // travelState/travelTime: SGTravelManager.TravelState (in the system, at the jump point,
+        // in transit...) and SimGameState.TravelTime. Neither is a company stat, so without them a
+        // guest left in the previous system, or still in transit after the host docked, would
+        // match (PR #3 review; live test 2026-11-01).
+        public static List<KeyValuePair<string, string>> Sections(
+            int daysPassed, int dayRemainingInQuarter, string systemId, int travelState, int travelTime,
+            IDictionary<string, StatValue> company, IEnumerable<PilotEntry> pilots,
+            IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay)
         {
-            var sb = new System.Text.StringBuilder();
-            sb.Append("day ").Append(daysPassed).Append(" quarter ").Append(dayRemainingInQuarter).Append('\n');
-            sb.Append("system ").Append(systemId ?? "(none)").Append('\n');
+            var list = new List<KeyValuePair<string, string>>();
+            void Add(string name, System.Text.StringBuilder text) => list.Add(new KeyValuePair<string, string>(name, text.ToString()));
+            System.Text.StringBuilder New() => new System.Text.StringBuilder();
+
+            var sb = New().Append("day ").Append(daysPassed).Append(" quarter ").Append(dayRemainingInQuarter).Append('\n');
+            Add("day", sb);
+            Add("system", New().Append("system ").Append(systemId ?? "(none)").Append('\n'));
+            Add("travel", New().Append("travel ").Append(travelState).Append(" time ").Append(travelTime).Append('\n'));
+            sb = New();
             foreach (var kv in company.OrderBy(kv => kv.Key, StringComparer.Ordinal))
                 sb.Append("c ").Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
+            Add("company", sb);
+            sb = New();
             foreach (var p in pilots.OrderBy(p => p.Guid, StringComparer.Ordinal))
             {
                 sb.Append("pilot ").Append(p.Guid).Append(' ').Append(p.Callsign).Append('\n');
                 foreach (var kv in p.Stats.OrderBy(kv => kv.Key, StringComparer.Ordinal))
                     sb.Append("p ").Append(p.Guid).Append(' ').Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
             }
-            foreach (var line in bays) sb.Append("bay ").Append(line).Append('\n');
-            foreach (var line in mechLab) sb.Append("mechlab ").Append(line).Append('\n');
-            foreach (var line in medBay) sb.Append("medbay ").Append(line).Append('\n');
-            return sb.ToString();
+            Add("pilots", sb);
+            sb = New(); foreach (var line in bays) sb.Append("bay ").Append(line).Append('\n'); Add("bays", sb);
+            sb = New(); foreach (var line in mechLab) sb.Append("mechlab ").Append(line).Append('\n'); Add("mechlab", sb);
+            sb = New(); foreach (var line in medBay) sb.Append("medbay ").Append(line).Append('\n'); Add("medbay", sb);
+            return list;
+        }
+
+        public static string Text(List<KeyValuePair<string, string>> sections) => string.Concat(sections.Select(s => s.Value));
+        public static uint Hash(List<KeyValuePair<string, string>> sections) => Fnv.Hash(Text(sections));
+        public static List<uint> SectionHashes(List<KeyValuePair<string, string>> sections) => sections.Select(s => Fnv.Hash(s.Value)).ToList();
+
+        // The names of the sections whose hashes differ (all of them if the lists don't line up).
+        public static List<string> Differing(IList<uint> host, IList<uint> mine)
+        {
+            if (host == null || mine == null || host.Count != mine.Count || host.Count != SectionNames.Length)
+                return SectionNames.ToList();
+            return SectionNames.Where((n, i) => host[i] != mine[i]).ToList();
         }
     }
 
