@@ -215,6 +215,20 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
     - On a mismatch, the guest logs the differing sections in full and reports their names to
       the host (channel 36, guest → host).
     - The host logs its own copy of those sections.
+- **PR #3 review 2, fixed in 0.0.19:**
+  - *Timeline countdowns.* The quarterly finance report and the travel order are timeline
+    entries (`WorkOrderEntry` with private `Cost` / `PaidCost`). `OnDayPassed` pays them
+    (`FinancialReportNotification.PayCost`, `Starmap.PayTravelOrderCost`) and replaces the
+    finance one at quarter rollover; the day counters don't move them.
+    - Statuses now carry both entries' cost and paid cost, and the guest sets them exactly. A
+      finished travel order is removed as the game does (`Starmap.RemoveCompletedTravelOrder`).
+    - Both remaining costs are in the fingerprint (`day` and `travel` sections).
+  - *Room-visit flags.* `COMPANY_HasVisitedRoom_*` (set only by each room's `EnterRoom`) and
+    `COMPANY_HasSeenTutorial_MechLab` / `COMPANY_HasSeenECMReview_MechLab` (set only by
+    `MechLabPanel`) are local to each player. They're left out of the fingerprint
+    (`CompanyFingerprint.IsLocalPresentation`) but still sync from the host. Other
+    "viewed"/"seen" stats come from the day simulation and stay checked.
+  - *Diagnostics.* The guest logs once per hold why host changes are waiting, and how many.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - arriving in a new system (its store, hiring hall and contracts are generated on the host);

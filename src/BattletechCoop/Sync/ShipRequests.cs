@@ -256,13 +256,16 @@ namespace BattletechCoop.Sync
 
         // Applies queued host changes in order. Statuses wait while the player is editing, unless
         // force: the player is about to make a change of their own, which must land after them.
+        private static string holdReason;
+
         internal static void ProcessInbox(bool force)
         {
-            if (Inbox.Count == 0) return;
+            if (Inbox.Count == 0) { holdReason = null; return; }
             var game = UnityGameInstance.BattleTechGame;
             var sim = game?.Combat == null ? game?.Simulation : null;
             var ready = ShipView.Ready && sim != null;
-            var statusesMayApply = !ShipView.Busy && (force || !GuestEditing());
+            var editing = GuestEditing();
+            var statusesMayApply = !ShipView.Busy && (force || !editing);
             Inbox.Process(ready, statusesMayApply, force, ApplyUpdate, payload =>
             {
                 try { CompanyLive.ApplyStatus(sim, payload); }
@@ -272,6 +275,16 @@ namespace BattletechCoop.Sync
                     WantHeal("a company update failed here");
                 }
             });
+            // Say once per hold why host changes are waiting, so a stalled day can be explained.
+            var reason = Inbox.Count == 0 ? null
+                : !ready ? (sim == null ? "not on the ship" : "the host's ship is loading")
+                : ShipView.Busy ? "a fresh ship was asked for"
+                : editing ? "the MechLab is open or pilot training is unconfirmed" : "waiting";
+            if (reason != null && reason != holdReason)
+                Log.Info($"LIVE guest: holding {Inbox.Count} host change(s): {reason}");
+            else if (reason == null && holdReason != null)
+                Log.Info("LIVE guest: caught up with the host");
+            holdReason = reason;
         }
 
         // Guest: this copy of the host's ship is out of date (a host change didn't apply here).

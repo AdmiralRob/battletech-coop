@@ -126,6 +126,9 @@ ends, and any change the friend makes while connected is kept for afterwards.
 
 Live company updates (0.0.16; ordering and travel fixes 0.0.17 and 0.0.18)
 -------------------------------------------------------------------------
+0.0.19: the schedule's finance report and travel countdowns now tick on the friend's screen
+as they do on the host's, and browsing a room the host hasn't visited no longer makes the
+friend's game reload.
 0.0.18: after a jump, the friend now docks at the planet together with the host (before, the
 friend stayed "in space" until a refresh, so the Store was unavailable), and a work order one
 player cancels now also leaves the other player's schedule.

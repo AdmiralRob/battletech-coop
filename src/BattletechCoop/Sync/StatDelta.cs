@@ -115,6 +115,8 @@ namespace BattletechCoop.Sync
         public readonly List<byte> Ops = new List<byte>();
         public int DaysPassed, DayRemainingInQuarter;
         public int TravelState, TravelTime;
+        // Timeline entries (WorkOrderEntry Cost/PaidCost), or -1 when the host has none.
+        public int FinanceCost = -1, FinancePaid = -1, TravelOrderCost = -1, TravelOrderPaid = -1;
         public readonly List<uint> SectionHashes = new List<uint>();
         public StatDelta Company = new StatDelta();
         public readonly SortedDictionary<string, StatDelta> Pilots = new SortedDictionary<string, StatDelta>(StringComparer.Ordinal);
@@ -141,6 +143,7 @@ namespace BattletechCoop.Sync
                 w.Write(TravelTime);
                 w.Write((byte)SectionHashes.Count);
                 foreach (var h in SectionHashes) w.Write(h);
+                w.Write(FinanceCost); w.Write(FinancePaid); w.Write(TravelOrderCost); w.Write(TravelOrderPaid);
                 w.Flush();
                 return ms.ToArray();
             }
@@ -163,6 +166,8 @@ namespace BattletechCoop.Sync
                 s.TravelTime = r.ReadInt32();
                 var sections = r.ReadByte();
                 for (var i = 0; i < sections; i++) s.SectionHashes.Add(r.ReadUInt32());
+                s.FinanceCost = r.ReadInt32(); s.FinancePaid = r.ReadInt32();
+                s.TravelOrderCost = r.ReadInt32(); s.TravelOrderPaid = r.ReadInt32();
                 return s;
             }
         }
@@ -182,26 +187,43 @@ namespace BattletechCoop.Sync
 
         public static readonly string[] SectionNames = { "day", "system", "travel", "company", "pilots", "bays", "mechlab", "medbay" };
 
+        // Company stats that each game sets for its own player's screens, so they legitimately
+        // differ between copies and are left out of the comparison (they still sync from the
+        // host). Checked in build 20387569: COMPANY_HasVisitedRoom_<room> is set only by that
+        // room's EnterRoom (and PlayEnterVO); COMPANY_HasSeenTutorial_MechLab and
+        // COMPANY_HasSeenECMReview_MechLab only by MechLabPanel. The other "viewed"/"seen" stats
+        // (NotificationViewed_*, HasSeenFlashpointNotification...) are set by the ship's day
+        // simulation and stay in (PR #3 review).
+        public static bool IsLocalPresentation(string stat) =>
+            stat.StartsWith("COMPANY_HasVisitedRoom_", StringComparison.Ordinal) ||
+            stat.StartsWith("COMPANY_HasSeen", StringComparison.Ordinal);
+
         // systemId: the current star system, kept apart from the company's stats (CurSystem).
         // travelState/travelTime: SGTravelManager.TravelState (in the system, at the jump point,
         // in transit...) and SimGameState.TravelTime. Neither is a company stat, so without them a
         // guest left in the previous system, or still in transit after the host docked, would
         // match (PR #3 review; live test 2026-11-01).
+        // financeLeft / travelOrderLeft: what the timeline shows for the quarterly finance report
+        // and the travel order (WorkOrderEntry.GetRemainingCost), or -1 when there is none.
+        // They are timeline objects of their own, not the day counters (PR #3 review).
         public static List<KeyValuePair<string, string>> Sections(
             int daysPassed, int dayRemainingInQuarter, string systemId, int travelState, int travelTime,
             IDictionary<string, StatValue> company, IEnumerable<PilotEntry> pilots,
-            IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay)
+            IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay,
+            int financeLeft = -1, int travelOrderLeft = -1)
         {
             var list = new List<KeyValuePair<string, string>>();
             void Add(string name, System.Text.StringBuilder text) => list.Add(new KeyValuePair<string, string>(name, text.ToString()));
             System.Text.StringBuilder New() => new System.Text.StringBuilder();
 
-            var sb = New().Append("day ").Append(daysPassed).Append(" quarter ").Append(dayRemainingInQuarter).Append('\n');
+            var sb = New().Append("day ").Append(daysPassed).Append(" quarter ").Append(dayRemainingInQuarter)
+                          .Append(" finance ").Append(financeLeft).Append('\n');
             Add("day", sb);
             Add("system", New().Append("system ").Append(systemId ?? "(none)").Append('\n'));
-            Add("travel", New().Append("travel ").Append(travelState).Append(" time ").Append(travelTime).Append('\n'));
+            Add("travel", New().Append("travel ").Append(travelState).Append(" time ").Append(travelTime)
+                               .Append(" order ").Append(travelOrderLeft).Append('\n'));
             sb = New();
-            foreach (var kv in company.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            foreach (var kv in company.Where(kv => !IsLocalPresentation(kv.Key)).OrderBy(kv => kv.Key, StringComparer.Ordinal))
                 sb.Append("c ").Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
             Add("company", sb);
             sb = New();

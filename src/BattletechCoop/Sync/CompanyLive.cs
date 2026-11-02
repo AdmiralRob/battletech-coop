@@ -120,7 +120,31 @@ namespace BattletechCoop.Sync
                 sim.MechLabQueue.Select(e => $"{e.GetType().Name} {(e as WorkOrderEntry_MechLab)?.MechID} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"),
                 // The MedBay queue is one work order whose sub-entries are the pilots healing.
                 (sim.MedBayQueue?.SubEntries ?? new List<WorkOrderEntry>())
-                    .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"));
+                    .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"),
+                sim.FinancialReportNotification?.GetRemainingCost() ?? -1,
+                sim.Starmap?.TravelOrder?.GetRemainingCost() ?? -1);
+
+        // The quarterly finance report and the travel order are timeline entries of their own:
+        // OnDayPassed pays them (FinancialReportNotification.PayCost, Starmap.PayTravelOrderCost)
+        // and replaces the finance one at quarter rollover. The day counters alone don't move
+        // them. Their Cost and PaidCost are private fields (SetCost sets only Cost).
+        private static readonly System.Reflection.FieldInfo CostField = AccessTools.Field(typeof(WorkOrderEntry), "Cost");
+        private static readonly System.Reflection.FieldInfo PaidField = AccessTools.Field(typeof(WorkOrderEntry), "PaidCost");
+
+        private static void ReadEntry(WorkOrderEntry e, out int cost, out int paid)
+        {
+            cost = paid = -1;
+            if (e == null || CostField == null || PaidField == null) return;
+            cost = Convert.ToInt32(CostField.GetValue(e));
+            paid = Convert.ToInt32(PaidField.GetValue(e));
+        }
+
+        private static void WriteEntry(WorkOrderEntry e, int cost, int paid)
+        {
+            if (e == null || cost < 0 || CostField == null || PaidField == null) return;
+            CostField.SetValue(e, Convert.ChangeType(cost, CostField.FieldType));
+            PaidField.SetValue(e, Convert.ChangeType(paid, PaidField.FieldType));
+        }
 
         internal static uint Fingerprint(SimGameState sim) => CompanyFingerprint.Hash(FingerprintSections(sim));
 
@@ -189,6 +213,8 @@ namespace BattletechCoop.Sync
                 Fingerprint = CompanyFingerprint.Hash(sections),
             };
             status.SectionHashes.AddRange(CompanyFingerprint.SectionHashes(sections));
+            ReadEntry(sim.FinancialReportNotification, out status.FinanceCost, out status.FinancePaid);
+            ReadEntry(sim.Starmap?.TravelOrder, out status.TravelOrderCost, out status.TravelOrderPaid);
             status.Ops.AddRange(ops);
             foreach (var kv in pilots)
             {
@@ -268,6 +294,21 @@ namespace BattletechCoop.Sync
                     sim.TravelManager.ForceTravelState(travel);
                 }
                 if (sim.TravelTime != status.TravelTime) sim.SetTravelTime(status.TravelTime, "coop");
+                // The timeline's finance countdown and travel order, as the host's (the redraw
+                // below refreshes the entries). A finished travel order goes the way the game's
+                // own does (Starmap.RemoveCompletedTravelOrder takes it off the timeline). One the
+                // guest lacks can't be made here: the fingerprint catches that.
+                WriteEntry(sim.FinancialReportNotification, status.FinanceCost, status.FinancePaid);
+                var starmap = sim.Starmap;
+                if (starmap?.TravelOrder != null)
+                {
+                    if (status.TravelOrderCost < 0)
+                    {
+                        starmap.RemoveCompletedTravelOrder();
+                        starmap.TravelOrder = null;
+                    }
+                    else WriteEntry(starmap.TravelOrder, status.TravelOrderCost, status.TravelOrderPaid);
+                }
                 StatApply.Apply(sim.CompanyStats, status.Company);
                 foreach (var kv in status.Pilots)
                 {

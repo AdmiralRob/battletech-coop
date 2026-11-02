@@ -30,11 +30,12 @@ static class Program
     static Dictionary<string, StatValue> Stats(params (string, StatValue)[] items) =>
         items.ToDictionary(i => i.Item1, i => i.Item2, StringComparer.Ordinal);
     static List<KeyValuePair<string, string>> Sections(string system = "starsystemdef_Claybrooke", int travelState = 0, int travelTime = 0,
-                                                       string[] mechLab = null, int day = 42) =>
+                                                       string[] mechLab = null, int day = 42, Dictionary<string, StatValue> company = null,
+                                                       int financeLeft = 29, int travelOrderLeft = -1) =>
         CompanyFingerprint.Sections(day, 10, system, travelState, travelTime,
-            Stats(("Funds", StatValue.Of(1000000))),
+            company ?? Stats(("Funds", StatValue.Of(1000000))),
             new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
-            new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0]);
+            new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0], financeLeft, travelOrderLeft);
     static bool Same(IDictionary<string, StatValue> a, IDictionary<string, StatValue> b) =>
         a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var v) && v.Equals(kv.Value));
 
@@ -247,6 +248,52 @@ static class Program
             var back = CompanyStatus.Decode(s.Encode());
             Check(back.TravelState == 4 && back.TravelTime == 3 && back.SectionHashes.SequenceEqual(s.SectionHashes), "travel or section hashes changed");
             Check(back.SectionHashes.Count == CompanyFingerprint.SectionNames.Length, "one hash per section");
+        });
+
+        // ---- PR #3 review 2: timeline entries and local presentation flags ----
+        Test("review repro: guest browses a room the host hasn't, then an unrelated host change -> no catch-up", () =>
+        {
+            var host = Stats(("Funds", StatValue.Of(1000000)), ("COMPANY_HasVisitedRoom_MechBay", StatValue.Of(false)));
+            var guest = new Dictionary<string, StatValue>(host) { ["COMPANY_HasVisitedRoom_MechBay"] = StatValue.Of(true) }; // EnterRoom, guest only
+            var hostAfter = new Dictionary<string, StatValue>(host) { ["Funds"] = StatValue.Of(987500) };
+            StatDelta.Between(host, hostAfter).ApplyTo(guest);                // the status: only Funds changed on the host
+            Check(CompanyFingerprint.Hash(Sections(company: hostAfter)) == CompanyFingerprint.Hash(Sections(company: guest)),
+                  "a room visit on the guest alone asks for a reload");
+            guest["Funds"] = StatValue.Of(1);
+            Check(CompanyFingerprint.Hash(Sections(company: hostAfter)) != CompanyFingerprint.Hash(Sections(company: guest)), "real company state no longer checked");
+        });
+
+        Test("only the verified local flags are left out of the comparison", () =>
+        {
+            foreach (var local in new[] { "COMPANY_HasVisitedRoom_Barracks", "COMPANY_HasVisitedRoom_Shop", "COMPANY_HasSeenTutorial_MechLab", "COMPANY_HasSeenECMReview_MechLab" })
+                Check(CompanyFingerprint.IsLocalPresentation(local), local + " should be local");
+            foreach (var shared in new[] { "COMPANY_NotificationViewed_LowFunds", "HasSeenFlashpointNotification", "HasSeenNewStarmapTechNotification", "COMPANY_MechWarriorsHired", "Funds" })
+                Check(!CompanyFingerprint.IsLocalPresentation(shared), shared + " is set by the day simulation and must stay checked");
+        });
+
+        Test("review repro: day applied but the finance countdown still shows the old value -> detected in 'day'", () =>
+        {
+            var host = Sections(financeLeft: 29);
+            var guest = Sections(financeLeft: 30); // DayRemainingInQuarter set, entry not paid
+            var diff = CompanyFingerprint.Differing(CompanyFingerprint.SectionHashes(host), CompanyFingerprint.SectionHashes(guest));
+            Check(diff.Count == 1 && diff[0] == "day", string.Join(",", diff));
+        });
+
+        Test("review repro: travel time copied but the travel order still shows the old value -> detected in 'travel'", () =>
+        {
+            var diff = CompanyFingerprint.Differing(CompanyFingerprint.SectionHashes(Sections(travelTime: 5, travelOrderLeft: 5)),
+                                                    CompanyFingerprint.SectionHashes(Sections(travelTime: 5, travelOrderLeft: 6)));
+            Check(diff.Count == 1 && diff[0] == "travel", string.Join(",", diff));
+            Check(CompanyFingerprint.Hash(Sections(travelOrderLeft: -1)) != CompanyFingerprint.Hash(Sections(travelOrderLeft: 0)), "no order vs finished order");
+        });
+
+        Test("timeline entries survive the wire; none is -1", () =>
+        {
+            var s = new CompanyStatus { FinanceCost = 90, FinancePaid = 61, TravelOrderCost = 6, TravelOrderPaid = 1 };
+            var back = CompanyStatus.Decode(s.Encode());
+            Check(back.FinanceCost == 90 && back.FinancePaid == 61 && back.TravelOrderCost == 6 && back.TravelOrderPaid == 1, "entries changed");
+            var none = CompanyStatus.Decode(new CompanyStatus().Encode());
+            Check(none.FinanceCost == -1 && none.TravelOrderCost == -1, "missing entries not -1");
         });
 
         Console.WriteLine($"{passed}/{passed + failed} passed");
