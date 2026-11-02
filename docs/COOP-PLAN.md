@@ -26,6 +26,10 @@ Two players (later 3–4) play one BattleTech Career together.
 - **Same build for both players.** The mod refuses mismatched installs, so one person builds
   from `main` and publishes a GitHub Release zip, and both install that zip before a session.
   Builds are local, because they need the game's DLLs.
+- **Building:** on Windows, run `dotnet build src/BattletechCoop -c Release` with
+  `GameDir.props` set (see the README). On Linux without NuGet access (Claude's workspace),
+  copy the game DLLs into a folder outside the repo, point `GameDir.props` at it, and run
+  `tools/build-linux.sh --install --tests`.
 - **Never commit game files or decompiled game code.** Naming game classes and methods is fine,
   as DESIGN.md does.
 - **Upstream PRs:** small, tested fixes (e.g. the guest HUD bug) are offered back to Cryswar.
