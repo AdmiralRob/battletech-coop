@@ -43,8 +43,7 @@ namespace BattletechCoop.Sync
         private static bool inDay;
         private static readonly List<byte> dayOps = new List<byte>();
 
-        // Guest
-        private static readonly Queue<byte[]> incoming = new Queue<byte[]>();
+        // Guest: statuses wait in ShipRequests.Inbox, in order with ordinary ship updates.
         private static bool replaying;
 
         public static void Reset()
@@ -53,7 +52,6 @@ namespace BattletechCoop.Sync
             basePilots = null;
             inDay = false;
             dayOps.Clear();
-            incoming.Clear();
         }
 
         private static CoopSession Session => CoopController.Instance?.Session;
@@ -108,31 +106,16 @@ namespace BattletechCoop.Sync
                 .ToDictionary(g => g.Key, g => Snapshot(g.First().StatCollection), StringComparer.Ordinal);
 
         // Everything the two copies must agree on, as text: the same on every PC.
-        internal static string FingerprintText(SimGameState sim)
-        {
-            var sb = new StringBuilder();
-            sb.Append("day ").Append(sim.DaysPassed).Append(" quarter ").Append(sim.DayRemainingInQuarter).Append('\n');
-            foreach (var kv in Snapshot(sim.CompanyStats).OrderBy(kv => kv.Key, StringComparer.Ordinal))
-                sb.Append("c ").Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
-            foreach (var p in Pilots(sim).OrderBy(p => p.GUID, StringComparer.Ordinal))
-            {
-                sb.Append("pilot ").Append(p.GUID).Append(' ').Append(p.Callsign).Append('\n');
-                foreach (var kv in Snapshot(p.StatCollection).OrderBy(kv => kv.Key, StringComparer.Ordinal))
-                    sb.Append("p ").Append(p.GUID).Append(' ').Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
-            }
-            foreach (var kv in sim.ActiveMechs.OrderBy(kv => kv.Key))
-                sb.Append("bay ").Append(kv.Key).Append(' ').Append(kv.Value.GUID).Append(" '").Append(kv.Value.Name).Append("'\n");
-            foreach (var e in sim.MechLabQueue)
-                sb.Append("mechlab ").Append(e.GetType().Name).Append(' ').Append((e as WorkOrderEntry_MechLab)?.MechID)
-                  .Append(' ').Append(e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)).Append('\n');
-            // The MedBay queue is one work order whose sub-entries are the pilots healing.
-            var medbay = sim.MedBayQueue;
-            if (medbay != null)
-                foreach (var e in medbay.SubEntries)
-                    sb.Append("medbay ").Append(e.GetType().Name).Append(' ')
-                      .Append(e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)).Append('\n');
-            return sb.ToString();
-        }
+        internal static string FingerprintText(SimGameState sim) =>
+            CompanyFingerprint.Text(
+                sim.DaysPassed, sim.DayRemainingInQuarter, sim.CurSystem?.ID,
+                Snapshot(sim.CompanyStats),
+                Pilots(sim).Select(p => new CompanyFingerprint.PilotEntry { Guid = p.GUID, Callsign = p.Callsign, Stats = Snapshot(p.StatCollection) }),
+                sim.ActiveMechs.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value.GUID} '{kv.Value.Name}'"),
+                sim.MechLabQueue.Select(e => $"{e.GetType().Name} {(e as WorkOrderEntry_MechLab)?.MechID} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"),
+                // The MedBay queue is one work order whose sub-entries are the pilots healing.
+                (sim.MedBayQueue?.SubEntries ?? new List<WorkOrderEntry>())
+                    .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"));
 
         internal static uint Fingerprint(SimGameState sim) => Fnv.Hash(FingerprintText(sim));
 
@@ -200,16 +183,14 @@ namespace BattletechCoop.Sync
         public static void HandleGameMessage(CoopSession session, byte sender, byte[] payload)
         {
             if (session.Role != SessionRole.Guest || sender != 0) return;
-            incoming.Enqueue(payload);
+            ShipRequests.Receive(GuestInbox.Kind.CompanyStatus, payload);
         }
 
-        // A full ship supersedes the statuses sent before it.
-        public static void ShipSaveReceived() => incoming.Clear();
-
-        private static void ApplyNext(SimGameState sim)
+        // Called by ShipRequests.ProcessInbox, in the order the host sent it.
+        internal static void ApplyStatus(SimGameState sim, byte[] payload)
         {
             CompanyStatus status;
-            try { status = CompanyStatus.Decode(incoming.Dequeue()); }
+            try { status = CompanyStatus.Decode(payload); }
             catch (Exception e) { Log.Error("LIVE guest: could not read a company update", e); return; }
 
             var missing = new List<string>();
@@ -242,7 +223,7 @@ namespace BattletechCoop.Sync
                      $"{status.Company.Set.Count + status.Company.Removed.Count} company stats, {status.Pilots.Count} pilots");
 
             // Check only when nothing of ours is still on its way to the host or waiting here.
-            if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates || incoming.Count > 0) return;
+            if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates) return;
             var text = FingerprintText(sim);
             var mine = Fnv.Hash(text);
             if (mine == status.Fingerprint) return;
@@ -279,18 +260,19 @@ namespace BattletechCoop.Sync
                 if (DateTime.UtcNow < nextCheck) return;
                 nextCheck = DateTime.UtcNow + CheckInterval;
                 if (HostLive(out _, out var sim) && Fingerprint(sim) != baseFingerprint) Send(sim, "company change", new List<byte>());
-                return;
             }
-            var guestSim = ShipSim();
-            while (incoming.Count > 0 && guestSim != null && ShipView.Ready && !ShipView.Busy && !ShipRequests.GuestEditing())
-            {
-                try { ApplyNext(guestSim); }
-                catch (Exception e)
-                {
-                    Log.Error("LIVE guest: could not apply a company update", e);
-                    ShipRequests.WantHeal("a company update failed here");
-                }
-            }
+            // Guest: statuses are applied by ShipRequests.ProcessInbox (every frame).
+        }
+
+        // Host: arriving in another star system brings that system's store, hiring hall and
+        // contracts, which the host's game generated. Those come with a full ship; the guest
+        // loads it once it isn't editing (ShipView).
+        internal static void ArrivedInSystem(SimGameState sim, StarSystem system)
+        {
+            var session = Session;
+            if (session == null || session.State != SessionState.Active || session.Role != SessionRole.Host) return;
+            if (!session.Players.Any(p => p.Index != 0) || ShipSim() != sim) return;
+            ShipView.MarkDirty("arrived in " + (system?.Name ?? "a new system"));
         }
 
         internal static bool Replaying => replaying;
@@ -357,5 +339,15 @@ namespace BattletechCoop.Sync
     public static class InjuriesPatch
     {
         static void Prefix() => CompanyLive.RecordOp(CompanyStatus.OpInjuries);
+    }
+
+    [HarmonyPatch(typeof(SimGameState), "SetCurrentSystem")]
+    public static class SetCurrentSystemPatch
+    {
+        static void Postfix(SimGameState __instance, StarSystem system)
+        {
+            try { CompanyLive.ArrivedInSystem(__instance, system); }
+            catch (Exception e) { Log.Error("LIVE: arrival", e); }
+        }
     }
 }

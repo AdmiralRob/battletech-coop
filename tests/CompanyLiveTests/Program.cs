@@ -6,6 +6,18 @@ using BattletechCoop.Sync;
 // The Unity-free half of live company updates: what changed between two stat snapshots, and
 // the CompanyStatus wire format. The game-facing half (StatCollection, SimGameState) is checked
 // against the real game DLL; see docs/COOP-PLAN.md.
+// Model of the game's Mech Bay queue for the ordering tests: a day pays 1 (MechTech skill)
+// against the first order; a ship update can add an order.
+sealed class MechBay
+{
+    public static readonly byte[] Day = { 0 };
+    public static byte[] AddRefit(byte cost) => new byte[] { 1, cost };
+    public List<int> Queue = new List<int>();
+    public string Describe() => string.Join(",", Queue);
+    public int Process(GuestInbox inbox, bool editing, bool force = false, bool ready = true) =>
+        inbox.Process(ready, !editing, force, update => Queue.Add(update[1]), status => { if (Queue.Count > 0) Queue[0] -= 1; });
+}
+
 static class Program
 {
     static int passed, failed;
@@ -96,6 +108,112 @@ static class Program
             var threw = false;
             try { CompanyStatus.Decode(bytes.Take(bytes.Length - 6).ToArray()); } catch (System.IO.EndOfStreamException) { threw = true; }
             Check(threw, "decoded a cut-off payload");
+        });
+
+        // ---- Order of host changes on the guest (GuestInbox), from the PR #3 review ----
+        // A tiny model of the game's Mech Bay queue: UpdateMechLabWorkQueue(true) pays the
+        // MechTech skill (1 here) against the first order, whenever it was added.
+        Test("review repro: a held day doesn't give progress to a refit the host added later", () =>
+        {
+            var guest = new MechBay();
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);        // host: day passes, no refit yet
+            guest.Process(inbox, editing: true);                          // guest has the MechLab open: held
+            inbox.Add(GuestInbox.Kind.ShipUpdate, MechBay.AddRefit(3));    // host: queues a refit afterwards
+            guest.Process(inbox, editing: true);                          // must wait behind the held day
+            Check(guest.Queue.Count == 0, "the refit jumped ahead of the held day");
+            guest.Process(inbox, editing: false);                         // MechLab closed
+            Check(guest.Queue.Count == 1 && guest.Queue[0] == 3, $"refit got progress for a day before it existed: {guest.Describe()}");
+        });
+
+        Test("review repro: a refit the guest confirms lands after the days held before it", () =>
+        {
+            var guest = new MechBay();
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);
+            guest.Process(inbox, editing: true);                          // held while in the MechLab
+            guest.Process(inbox, editing: true, force: true);             // ShipRequests.CaptureSession, before the game adds the order
+            guest.Queue.Add(3);                                           // the guest's own refit
+            guest.Process(inbox, editing: false);
+            Check(guest.Queue.Count == 1 && guest.Queue[0] == 3, $"held day replayed onto the guest's new refit: {guest.Describe()}");
+        });
+
+        Test("control: a refit that existed before the day still gets that day's progress", () =>
+        {
+            var guest = new MechBay { Queue = { 3 } };
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);
+            guest.Process(inbox, editing: true);
+            guest.Process(inbox, editing: false);
+            Check(guest.Queue[0] == 2, guest.Describe());
+        });
+
+        Test("with nothing held, host ship updates still apply at once, even while editing", () =>
+        {
+            var guest = new MechBay();
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.ShipUpdate, MechBay.AddRefit(3));
+            Check(guest.Process(inbox, editing: true) == 1 && guest.Queue.Count == 1, "update waited for nothing");
+        });
+
+        Test("while the ship loads nothing applies; afterwards everything applies in order", () =>
+        {
+            var guest = new MechBay { Queue = { 2 } };
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);
+            inbox.Add(GuestInbox.Kind.ShipUpdate, MechBay.AddRefit(3));
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);
+            Check(guest.Process(inbox, editing: false, ready: false) == 0 && inbox.Count == 3, "applied while loading");
+            guest.Process(inbox, editing: false);
+            // day: 2->1; refit 3 added; day: 1->0 (the first order is paid first)
+            Check(guest.Describe() == "0,3", guest.Describe());
+        });
+
+        Test("a new ship drops everything sent before it", () =>
+        {
+            var inbox = new GuestInbox();
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);
+            inbox.Add(GuestInbox.Kind.ShipUpdate, MechBay.AddRefit(3));
+            inbox.Clear();
+            Check(inbox.Count == 0, "not cleared");
+        });
+
+        Test("applying an item can't start applying the next one inside it", () =>
+        {
+            var inbox = new GuestInbox();
+            var order = new List<string>();
+            inbox.Add(GuestInbox.Kind.ShipUpdate, new byte[] { 1 });
+            inbox.Add(GuestInbox.Kind.ShipUpdate, new byte[] { 2 });
+            inbox.Process(true, true, false, p =>
+            {
+                order.Add("start " + p[0]);
+                inbox.Process(true, true, true, q => order.Add("nested " + q[0]), q => { }); // a capture inside a replay
+                order.Add("end " + p[0]);
+            }, p => { });
+            Check(string.Join(",", order) == "start 1,end 1,start 2,end 2", string.Join(",", order));
+        });
+
+        // ---- Fingerprint (CompanyFingerprint), from the PR #3 review ----
+        Test("review repro: systems differ while everything else matches -> fingerprints differ", () =>
+        {
+            Func<string, uint> fp = system => Fnv.Hash(CompanyFingerprint.Text(42, 10, system, day1,
+                new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
+                new[] { "0 mech1 'Blackjack'" }, new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0]));
+            Check(fp("starsystemdef_Claybrooke") == fp("starsystemdef_Claybrooke"), "same state, different fingerprints");
+            Check(fp("starsystemdef_Claybrooke") != fp("starsystemdef_Detroit"), "a guest left in the previous system matches the host");
+            Check(fp(null) != fp("starsystemdef_Claybrooke"), "no system matches a system");
+        });
+
+        Test("fingerprint: pilot order and stat order don't matter, values do", () =>
+        {
+            var a = new CompanyFingerprint.PilotEntry { Guid = "A", Callsign = "a", Stats = Stats(("x", StatValue.Of(1)), ("y", StatValue.Of(2))) };
+            var b = new CompanyFingerprint.PilotEntry { Guid = "B", Callsign = "b", Stats = Stats(("y", StatValue.Of(2)), ("x", StatValue.Of(1))) };
+            var none = new string[0];
+            var t1 = CompanyFingerprint.Text(1, 1, "s", day1, new[] { a, b }, none, none, none);
+            var t2 = CompanyFingerprint.Text(1, 1, "s", day1, new[] { b, a }, none, none, none);
+            Check(t1 == t2, "order changed the fingerprint");
+            b.Stats["x"] = StatValue.Of(9);
+            Check(CompanyFingerprint.Text(1, 1, "s", day1, new[] { a, b }, none, none, none) != t1, "a pilot stat change was missed");
         });
 
         Console.WriteLine($"{passed}/{passed + failed} passed");

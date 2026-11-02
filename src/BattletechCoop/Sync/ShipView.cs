@@ -146,6 +146,14 @@ namespace BattletechCoop.Sync
             var game = SceneSingletonBehavior<UnityGameInstance>.HasInstance ? UnityGameInstance.BattleTechGame : null;
             if (game == null || game.Combat != null) return; // finish the battle / results first
             if (LazySingletonBehavior<LoadTransitioning>.Instance == null) return;
+            // A ship the player didn't ask for (the host arrived in another system, came back from
+            // a mission...) waits while they are editing, so nothing they're doing is thrown away.
+            if (!Refreshing && ShipRequests.GuestEditing())
+            {
+                if (UnityEngine.Time.realtimeSinceStartup >= ShipRequests.NoticeUntil)
+                    ShipRequests.ShowNotice("The host's ship changed; updating once you finish here", 4f);
+                return;
+            }
 
             var bytes = pendingLoad;
             pendingLoad = null;
@@ -177,7 +185,6 @@ namespace BattletechCoop.Sync
                     pendingLoad = r.ReadBytes(r.ReadInt32());
                     Log.Info($"SHIP guest: received the host's ship '{GuestCompany}' ({pendingLoad.Length} bytes)");
                     ShipRequests.ShipSaveReceived();
-                    CompanyLive.ShipSaveReceived();
                     refreshReceived = true;
                     ShipRequests.ShowNotice("Loading the host's ship...", 60f);
                 }

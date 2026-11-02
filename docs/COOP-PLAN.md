@@ -188,11 +188,22 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
   - Statuses wait on the guest while its ship loads or the player is editing, and a new ship
     clears them.
   - The host doesn't send statuses while a ship is pending (`ShipView.SnapshotPending`).
+- **Order on the guest** (PR #3 review): ship updates (channel 23) and statuses (channel 36) share
+  one queue (`GuestInbox`, owned by `ShipRequests`), applied strictly in the order the host sent
+  them. A held status holds everything behind it, so a day replays against the queue as it was
+  on the host that day.
+  - Before any local guest change, `ShipRequests.CaptureSession` (called first, in a prefix, by
+    every capture) applies everything held. The change then lands after the host's earlier days.
+- **Travel** (PR #3 review): the current system is part of the fingerprint. The host sends a fresh
+  ship on `SimGameState.SetCurrentSystem`, since the new system's store, hiring hall and
+  contracts come from the host. On the guest, a ship it didn't ask for waits while it's editing.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - arriving in a new system (its store, hiring hall and contracts are generated on the host);
   - Argo upgrade construction.
-- **Tests:** `tests/CompanyLiveTests` covers the deltas and wire format. The `StatCollection`
+- **Tests:** `tests/CompanyLiveTests` covers the deltas, the wire format, the guest's application
+  order (both review scenarios, against a model of the Mech Bay queue) and the fingerprint
+  (including the system). The `StatCollection`
   apply path and the `OnDayPassed` patch target were checked against the real game DLL.
 
 ## Open questions

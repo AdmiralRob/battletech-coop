@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/BattletechCoop/Sync/StatDelta.cs" Link="StatDelta.cs" />
+    <Compile Include="../../src/BattletechCoop/Sync/GuestInbox.cs" Link="GuestInbox.cs" />
   </ItemGroup>
 </Project>

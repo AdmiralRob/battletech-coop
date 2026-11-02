@@ -158,6 +158,41 @@ namespace BattletechCoop.Sync
         }
     }
 
+    // Everything the host's and the guest's copies of the company must agree on, as text that is
+    // the same on every PC. CompanyLive gathers the parts from the game; this only lays them out.
+    internal static class CompanyFingerprint
+    {
+        internal sealed class PilotEntry
+        {
+            public string Guid, Callsign;
+            public IDictionary<string, StatValue> Stats;
+        }
+
+        // systemId: the current star system's ID. It is stored apart from the company's stats
+        // (SimGameState.CurSystem, set by SetCurrentSystem), so without it a guest still in the
+        // previous system could match after a jump (PR #3 review).
+        public static string Text(int daysPassed, int dayRemainingInQuarter, string systemId,
+                                  IDictionary<string, StatValue> company, IEnumerable<PilotEntry> pilots,
+                                  IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("day ").Append(daysPassed).Append(" quarter ").Append(dayRemainingInQuarter).Append('\n');
+            sb.Append("system ").Append(systemId ?? "(none)").Append('\n');
+            foreach (var kv in company.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                sb.Append("c ").Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
+            foreach (var p in pilots.OrderBy(p => p.Guid, StringComparer.Ordinal))
+            {
+                sb.Append("pilot ").Append(p.Guid).Append(' ').Append(p.Callsign).Append('\n');
+                foreach (var kv in p.Stats.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                    sb.Append("p ").Append(p.Guid).Append(' ').Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
+            }
+            foreach (var line in bays) sb.Append("bay ").Append(line).Append('\n');
+            foreach (var line in mechLab) sb.Append("mechlab ").Append(line).Append('\n');
+            foreach (var line in medBay) sb.Append("medbay ").Append(line).Append('\n');
+            return sb.ToString();
+        }
+    }
+
     // FNV-1a over the fingerprint text: the same on every PC.
     internal static class Fnv
     {

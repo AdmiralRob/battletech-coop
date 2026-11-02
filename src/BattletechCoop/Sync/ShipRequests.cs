@@ -36,7 +36,8 @@ namespace BattletechCoop.Sync
 
         // While a change from the other side is being applied, the capture patches stay quiet.
         private static bool applyingRemote;
-        private static readonly List<byte[]> queuedUpdates = new List<byte[]>();
+        // Guest: ship updates and company statuses from the host, in the order it sent them.
+        internal static readonly GuestInbox Inbox = new GuestInbox();
         private static bool screensDirty;
 
         // Guest: a host change didn't apply, so this copy of the ship differs from the host's.
@@ -50,7 +51,7 @@ namespace BattletechCoop.Sync
         // Guest: requests sent to the host that it hasn't answered yet. While any is out, this
         // copy is ahead of the host's, so CompanyLive skips its fingerprint check.
         internal static int PendingRequests { get; private set; }
-        internal static bool HasQueuedUpdates => queuedUpdates.Count > 0;
+        internal static bool HasQueuedUpdates => Inbox.Count > 0;
         internal static void MarkScreensDirty() => screensDirty = true;
 
         // Run a change that came from the host without the capture patches sending it back.
@@ -73,7 +74,15 @@ namespace BattletechCoop.Sync
             if (session == null || session.State != SessionState.Active || CombatSync.Current != null) return null;
             var game = UnityGameInstance.BattleTechGame;
             if (game?.Simulation == null || game.Combat != null) return null;
-            if (session.Role == SessionRole.Guest) return ShipView.GuestViewing ? session : null;
+            if (session.Role == SessionRole.Guest)
+            {
+                if (!ShipView.GuestViewing) return null;
+                // Every capture starts here, in a prefix, before the game makes the change. The
+                // host made its earlier changes (and passed its earlier days) before this one, so
+                // apply everything still held first (PR #3 review).
+                ProcessInbox(true);
+                return session;
+            }
             return session.Players.Any(p => p.Index != 0) ? session : null;
         }
 
@@ -197,9 +206,9 @@ namespace BattletechCoop.Sync
         {
             if (channel == ChannelUpdate && session.Role == SessionRole.Guest)
             {
-                // A ship still loading predates this change: apply it once the ship is showing.
-                if (ShipView.Ready) ApplyUpdate(payload);
-                else queuedUpdates.Add(payload);
+                // In order with company statuses; applied now unless something before it waits
+                // (a ship still loading, or a held status).
+                Receive(GuestInbox.Kind.ShipUpdate, payload);
                 return;
             }
             using (var r = new BinaryReader(new MemoryStream(payload), Encoding.UTF8))
@@ -233,9 +242,36 @@ namespace BattletechCoop.Sync
         // A full ship save supersedes the updates sent before it.
         public static void ShipSaveReceived()
         {
-            queuedUpdates.Clear();
+            Inbox.Clear();
             healWanted = false;
             healAskedForThisShip = false;
+        }
+
+        // Guest: something about the host's ship arrived; apply what may be applied now.
+        internal static void Receive(GuestInbox.Kind kind, byte[] payload)
+        {
+            Inbox.Add(kind, payload);
+            ProcessInbox(false);
+        }
+
+        // Applies queued host changes in order. Statuses wait while the player is editing, unless
+        // force: the player is about to make a change of their own, which must land after them.
+        internal static void ProcessInbox(bool force)
+        {
+            if (Inbox.Count == 0) return;
+            var game = UnityGameInstance.BattleTechGame;
+            var sim = game?.Combat == null ? game?.Simulation : null;
+            var ready = ShipView.Ready && sim != null;
+            var statusesMayApply = !ShipView.Busy && (force || !GuestEditing());
+            Inbox.Process(ready, statusesMayApply, force, ApplyUpdate, payload =>
+            {
+                try { CompanyLive.ApplyStatus(sim, payload); }
+                catch (Exception e)
+                {
+                    Log.Error("LIVE guest: could not apply a company update", e);
+                    WantHeal("a company update failed here");
+                }
+            });
         }
 
         // Guest: this copy of the host's ship is out of date (a host change didn't apply here).
@@ -338,7 +374,7 @@ namespace BattletechCoop.Sync
 
         public static void Reset()
         {
-            queuedUpdates.Clear();
+            Inbox.Clear();
             screensDirty = false;
             healWanted = false;
             healAskedForThisShip = false;
@@ -348,12 +384,7 @@ namespace BattletechCoop.Sync
         public static void Update()
         {
             ClearCaptureDepth();
-            if (queuedUpdates.Count > 0 && ShipView.Ready)
-            {
-                var updates = queuedUpdates.ToArray();
-                queuedUpdates.Clear();
-                foreach (var u in updates) ApplyUpdate(u);
-            }
+            ProcessInbox(false);
             if (screensDirty) RedrawScreens();
             UpdateHeal();
         }
