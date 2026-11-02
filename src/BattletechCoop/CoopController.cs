@@ -353,6 +353,7 @@ namespace BattletechCoop
                 Sync.ShipView.Update(Session);
                 Sync.ShipRequests.Update();
                 Sync.MissionStart.Update();
+                Sync.SettingsSync.Update();
                 Sync.CombatSync.UpdateIdleGuest(Session);
                 UpdateTestModes();
             }

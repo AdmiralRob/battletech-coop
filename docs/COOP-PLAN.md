@@ -126,11 +126,23 @@ Design (`Sync/SettingsSync.cs`):
 - **When the host sends:**
   - on guest join;
   - after any `UserSettings.Save` that changed one of these values.
-- **Guest settings are protected.** The values live in `CloudUserSettings` (Steam Cloud). On the
-  guest, a prefix on `UserSettings.Save` serializes the guest's own values and keeps any edit
-  the guest made mid-session. The postfix then puts the host's values back. Serialization is
-  synchronous inside `Save`, so the swap covers it.
+- **Guest settings are protected.** `CloudUserSettings` is stored by exactly two synchronous
+  writers:
+  - `UserSettings.Save` (Steam Cloud);
+  - `CachedSettings.SaveSettingsToPlayerPrefs` (the PlayerPrefs cache; also the only write when
+    there's no SaveManager, and called during settings load).
+
+  On the guest, both are patched to write the guest's own values and put the host's back after.
+  The patches act only on the settings object holding the host's values, never call back into
+  the game, and count nested writes once. A write that throws is repaired on the next frame
+  (`SettingsSync.Update`).
+- **Guest edits** are read from the Options screen itself. `GameSettingsModule` keeps
+  `original<X>` and `current<X>` from when the screen opened, so `current != original` is
+  exactly what the guest changed. A host update while the screen is open isn't mistaken for an
+  edit. This came from the PR #2 review by Morgan + ChatGPT.
 - **The guest's own values return** when the session closes.
+- **Regression tests:** `tests/SettingsTests` compiles the real `SettingsSync.cs` against
+  stand-ins that follow the game's save order.
 
 ## Open questions
 
