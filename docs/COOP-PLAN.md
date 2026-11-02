@@ -247,6 +247,27 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
   - The fingerprint now includes the route and index (`travel`) and a `market` section.
   - Known gap: after a jump the guest's contract list is empty (`OnSystemExit` →
     `ResetContracts`; contracts are host-only).
+- **PR #3 review 3, fixed in 0.0.21:**
+  - *Route without its travel order.* `SetActivePath` → `CreateActivePath` takes
+    `PendingTravelOrder` (made by `OnPathfindingComplete`, which following a route skips) as the
+    trip's timeline entry; with none, `TaskTimelineWidget.AddEntry` threw. Statuses now carry the
+    travel order with its legs (`TravelOrderData`), and the guest builds it with the game's own
+    constructors (`WorkOrderEntry_TravelGeneric` and its `TravelToJumpPoint` / `TravelJumping` /
+    `TravelToSystem` legs) and sets it as `PendingTravelOrder` before activating, replacing any
+    order it planned itself.
+  - *Leg payments.* `PayCost` pays the legs first and `GetRemainingCost` sums them, so a day's
+    travel moves a leg's `PaidCost` while the parent stays 0/0. The guest now sets every leg's
+    `Cost` / `PaidCost`; a trip of another shape is replaced on the timeline
+    (`RemoveCompletedTravelOrder`, then `AddWorkQueueEntry`). The fingerprint lists each entry's
+    type and payments (not the localized descriptions).
+  - *Held days overtaken by later actions.* The host no longer holds a day's status: it goes out
+    when the day ends, in order with everything sent after it. If the host hasn't settled (jump
+    animation, shops loading), it is marked partial: the guest applies its queue steps and stats
+    but not travel or the market, and skips the fingerprint check. A settled status follows as
+    soon as the host settles (`HostStatusGate`).
+  - Checked against the real DLL: the built trip's types, parents and remaining cost; a day's
+    `PayCost` paying the first leg with the parent at 0/0; the guest's legs taking the host's
+    payments through two stages; the `Starmap` members set.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - the contract list of a new system;

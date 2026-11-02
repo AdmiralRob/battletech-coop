@@ -42,9 +42,9 @@ namespace BattletechCoop.Sync
         private static DateTime nextCheck = DateTime.MinValue;
         private static bool inDay;
         private static readonly List<byte> dayOps = new List<byte>();
-        // Days whose status waits for the travel animation to settle (see Settled).
-        private static readonly List<byte> heldOps = new List<byte>();
-        private static string heldWhy;
+        // A day's status goes out when the day ends; one sent before the host settled is partial
+        // and a settled one follows (see Settled, HostStatusGate).
+        private static readonly HostStatusGate gate = new HostStatusGate();
 
         private static uint baseMarket; // host: market hash the guests have
 
@@ -58,8 +58,7 @@ namespace BattletechCoop.Sync
             basePilots = null;
             inDay = false;
             dayOps.Clear();
-            heldOps.Clear();
-            heldWhy = null;
+            gate.Reset();
             pendingMarket = null;
         }
 
@@ -130,7 +129,8 @@ namespace BattletechCoop.Sync
                     .Select(e => $"{e.GetType().Name} {e.GetRemainingCost().ToString(CultureInfo.InvariantCulture)}"),
                 sim.FinancialReportNotification?.GetRemainingCost() ?? -1,
                 sim.Starmap?.TravelOrder?.GetRemainingCost() ?? -1,
-                RouteIds(sim), TravelIndex(sim), MarketLines(sim));
+                RouteIds(sim), TravelIndex(sim), MarketLines(sim),
+                ReadTravelOrder(sim.Starmap?.TravelOrder)?.Lines());
 
         // ---- Travel route and market ----
 
@@ -248,12 +248,22 @@ namespace BattletechCoop.Sync
                 // CreateActivePath: travel order, travel state, timeline). The route comes from
                 // the host instead of this copy's own pathfinding.
                 var nodes = status.Route.Select(id => starmap.GetSystemByID(id)).ToList();
+                var order = BuildTravelOrder(status.TravelOrder);
                 if (nodes.Any(n => n == null)) Log.Info("LIVE guest: the host's route has a system this copy doesn't know");
+                else if (order == null)
+                    Traverse.Create(starmap).Property("ActivePath").SetValue(nodes); // a route without a trip: nothing to start
                 else
                 {
+                    // CreateActivePath takes PendingTravelOrder as the trip's timeline entry; the
+                    // game makes it in OnPathfindingComplete, which this skips, so it is the
+                    // host's order (PR #3 review 3). Any order this copy planned is replaced.
+                    Traverse.Create(starmap).Field("PendingTravelOrder").SetValue(order);
                     Traverse.Create(starmap).Property("PotentialPath").SetValue(nodes);
                     try { starmap.SetActivePath(); }
-                    catch (NullReferenceException) { } // the starmap's renderer isn't up; the trip is made before it's drawn
+                    // SetActivePath ends with the starmap renderer's UpdateActivePath, after the
+                    // trip is made; with the starmap screen not up that throws. SyncTravelOrder
+                    // below repairs the timeline entry if anything else went wrong.
+                    catch (Exception e) when (starmap.Screen == null) { Log.Info($"LIVE guest: route started without the starmap screen ({e.GetType().Name})"); }
                     Log.Info($"LIVE guest: following the host's route {string.Join(" > ", status.Route.ToArray())}");
                 }
             }
@@ -296,6 +306,77 @@ namespace BattletechCoop.Sync
             PaidField.SetValue(e, Convert.ChangeType(paid, PaidField.FieldType));
         }
 
+        // The travel order and its legs (TravelOrderData). WorkOrderType: 30 TravelGeneric (the
+        // trip), 31 TravelToJumpPoint, 32 TravelJumping, 33 TravelToSystem (checked in build
+        // 20387569: their constructors pass these to WorkOrderEntry, and the legs add themselves
+        // to the parent's SubEntries).
+        internal static TravelOrderData ReadTravelOrder(WorkOrderEntry e)
+        {
+            if (e == null) return null;
+            var t = new TravelOrderData();
+            Fill(t.Root, e);
+            foreach (var leg in e.SubEntries ?? new List<WorkOrderEntry>()) { var d = new TravelOrderData.Entry(); Fill(d, leg); t.Legs.Add(d); }
+            return t;
+        }
+
+        private static void Fill(TravelOrderData.Entry d, WorkOrderEntry e)
+        {
+            d.Type = (int)e.Type;
+            d.Id = e.ID ?? "";
+            d.Description = e.Description ?? "";
+            ReadEntry(e, out d.Cost, out d.Paid);
+        }
+
+        private static WorkOrderEntry_TravelGeneric BuildTravelOrder(TravelOrderData t)
+        {
+            if (t == null || t.Root.Type != 30) return null;
+            var root = new WorkOrderEntry_TravelGeneric(t.Root.Id, t.Root.Description, t.Root.Cost, "");
+            foreach (var leg in t.Legs)
+            {
+                if (leg.Type == 31) new WorkOrderEntry_TravelToJumpPoint(leg.Id, leg.Description, leg.Cost, root, "");
+                else if (leg.Type == 32) new WorkOrderEntry_TravelJumping(leg.Id, leg.Description, leg.Cost, root, "");
+                else if (leg.Type == 33) new WorkOrderEntry_TravelToSystem(leg.Id, leg.Description, leg.Cost, root, "");
+                else { Log.Info($"LIVE guest: the host's travel order has a leg of type {leg.Type}"); return null; }
+            }
+            WriteTravelOrder(root, t);
+            return root;
+        }
+
+        private static void WriteTravelOrder(WorkOrderEntry e, TravelOrderData t)
+        {
+            WriteEntry(e, t.Root.Cost, t.Root.Paid);
+            for (var i = 0; i < t.Legs.Count; i++) WriteEntry(e.SubEntries[i], t.Legs[i].Cost, t.Legs[i].Paid);
+        }
+
+        // Guest: the travel order as the host's, legs and payments included. The same trip only
+        // gets its payments; another (or none) is replaced on the timeline as the game does
+        // (RemoveCompletedTravelOrder, then AddWorkQueueEntry as CreateActivePath does).
+        private static void SyncTravelOrder(SimGameState sim, TravelOrderData host)
+        {
+            var starmap = sim.Starmap;
+            if (starmap == null) return;
+            var mine = starmap.TravelOrder;
+            if (host == null)
+            {
+                if (mine == null) return;
+                starmap.RemoveCompletedTravelOrder();
+                starmap.TravelOrder = null;
+                return;
+            }
+            if (mine != null && host.SameShape((int)mine.Type, (mine.SubEntries ?? new List<WorkOrderEntry>()).Select(e => (int)e.Type).ToList()))
+            {
+                WriteTravelOrder(mine, host);
+                return;
+            }
+            var built = BuildTravelOrder(host);
+            if (built == null) return; // the fingerprint catches it
+            if (mine != null) starmap.RemoveCompletedTravelOrder();
+            starmap.TravelOrder = built;
+            if (sim.RoomManager != null)
+                Traverse.Create(starmap).Property("TravelItem").SetValue(sim.RoomManager.AddWorkQueueEntry(built));
+            Log.Info("LIVE guest: travel order replaced with the host's");
+        }
+
         internal static uint Fingerprint(SimGameState sim) => CompanyFingerprint.Hash(FingerprintSections(sim));
 
         // ---- Host ----
@@ -308,8 +389,7 @@ namespace BattletechCoop.Sync
             baseFingerprint = Fingerprint(sim);
             baseMarket = AnyShopPending(sim) ? 0u : MarketHash(sim);
             nextCheck = DateTime.UtcNow + CheckInterval;
-            heldOps.Clear(); // the ship already has those days
-            heldWhy = null;
+            gate.Reset(); // the ship is settled state
         }
 
         // Mid-animation (a jump playing) the travel state is in between; a status taken then would
@@ -331,25 +411,19 @@ namespace BattletechCoop.Sync
             if (inDay) dayOps.Add(op);
         }
 
+        // The day's status goes out now, before anything the host sends after it (a refit it
+        // accepts next must not get this day's progress on the guest: PR #3 review 3).
         internal static void EndDay(SimGameState sim)
         {
             if (!inDay) return;
             inDay = false;
-            heldOps.AddRange(dayOps);
-            heldWhy = "day " + sim.DaysPassed;
+            var ops = dayOps.ToList();
             dayOps.Clear();
-            SendHeld(sim);
+            var partial = gate.DayEnded(Settled(sim));
+            Send(sim, "day " + sim.DaysPassed, ops, partial);
         }
 
-        private static void SendHeld(SimGameState sim)
-        {
-            if (heldWhy == null || !Settled(sim)) return;
-            Send(sim, heldWhy, heldOps.ToList());
-            heldOps.Clear();
-            heldWhy = null;
-        }
-
-        private static void Send(SimGameState sim, string why, List<byte> ops)
+        private static void Send(SimGameState sim, string why, List<byte> ops, bool partial)
         {
             if (!HostLive(out var session, out var live) || !ReferenceEquals(live, sim)) return;
             var company = Snapshot(sim.CompanyStats);
@@ -364,28 +438,34 @@ namespace BattletechCoop.Sync
                 TravelTime = sim.TravelTime,
                 Company = StatDelta.Between(baseCompany, company),
                 Fingerprint = CompanyFingerprint.Hash(sections),
+                Partial = partial,
             };
             status.SectionHashes.AddRange(CompanyFingerprint.SectionHashes(sections));
             ReadEntry(sim.FinancialReportNotification, out status.FinanceCost, out status.FinancePaid);
-            ReadEntry(sim.Starmap?.TravelOrder, out status.TravelOrderCost, out status.TravelOrderPaid);
-            status.SystemId = sim.CurSystem?.ID ?? "";
-            status.TravelIndex = TravelIndex(sim);
-            status.Route.AddRange(RouteIds(sim));
-            var market = MarketHash(sim);
-            if (market != baseMarket) status.Market = BuildMarket(sim);
+            var market = baseMarket;
+            if (!partial)
+            {
+                status.TravelOrder = ReadTravelOrder(sim.Starmap?.TravelOrder);
+                status.SystemId = sim.CurSystem?.ID ?? "";
+                status.TravelIndex = TravelIndex(sim);
+                status.Route.AddRange(RouteIds(sim));
+                market = MarketHash(sim);
+                if (market != baseMarket) status.Market = BuildMarket(sim);
+            }
             status.Ops.AddRange(ops);
             foreach (var kv in pilots)
             {
                 basePilots.TryGetValue(kv.Key, out var before);
                 status.Pilots[kv.Key] = StatDelta.Between(before, kv.Value);
             }
-            if (!status.HasChanges && status.Fingerprint == baseFingerprint && status.Market == null) return;
+            if (!status.HasChanges && status.Fingerprint == baseFingerprint && status.Market == null && (partial || !gate.Owed)) return;
             session.SendGame(Channel, status.Encode());
+            if (!partial) gate.SentSettled();
             baseMarket = market;
             baseCompany = company;
             basePilots = pilots;
             baseFingerprint = status.Fingerprint;
-            Log.Info($"LIVE host: sent {why}: {status.Ops.Count} queue steps, {status.Company.Set.Count + status.Company.Removed.Count} company stats, " +
+            Log.Info($"LIVE host: sent {why}{(partial ? " (partial: travel or shops still settling)" : "")}: {status.Ops.Count} queue steps, {status.Company.Set.Count + status.Company.Removed.Count} company stats, " +
                      $"{status.Pilots.Values.Count(p => !p.IsEmpty)} pilots, fingerprint {status.Fingerprint:x8}");
         }
 
@@ -442,33 +522,8 @@ namespace BattletechCoop.Sync
                     }
                 }
                 finally { replaying = false; }
-                FollowTravel(sim, status);
-                // Travel isn't a company stat: the host's travel state (docked, in transit...) and
-                // time left. ForceTravelState is the state machine's own direct setter (it also
-                // updates the travel-related company stats); the stats below then match the host.
-                var travel = (SimGameTravelStatus)status.TravelState;
-                if ((int)sim.TravelState != status.TravelState && sim.TravelManager != null
-                    && travel != SimGameTravelStatus.TRANSITION_ANIMATING && travel != SimGameTravelStatus.UNKNOWN)
-                {
-                    Log.Info($"LIVE guest: travel {sim.TravelState} -> {(SimGameTravelStatus)status.TravelState}");
-                    sim.TravelManager.ForceTravelState(travel);
-                }
-                if (sim.TravelTime != status.TravelTime) sim.SetTravelTime(status.TravelTime, "coop");
-                // The timeline's finance countdown and travel order, as the host's (the redraw
-                // below refreshes the entries). A finished travel order goes the way the game's
-                // own does (Starmap.RemoveCompletedTravelOrder takes it off the timeline). One the
-                // guest lacks can't be made here: the fingerprint catches that.
+                if (!status.Partial) ApplyTravel(sim, status);
                 WriteEntry(sim.FinancialReportNotification, status.FinanceCost, status.FinancePaid);
-                var starmap = sim.Starmap;
-                if (starmap?.TravelOrder != null)
-                {
-                    if (status.TravelOrderCost < 0)
-                    {
-                        starmap.RemoveCompletedTravelOrder();
-                        starmap.TravelOrder = null;
-                    }
-                    else WriteEntry(starmap.TravelOrder, status.TravelOrderCost, status.TravelOrderPaid);
-                }
                 StatApply.Apply(sim.CompanyStats, status.Company);
                 foreach (var kv in status.Pilots)
                 {
@@ -486,11 +541,36 @@ namespace BattletechCoop.Sync
                 if (TryApplyMarket(sim, pendingMarket)) pendingMarket = null;
             }
             Redraw(sim);
-            Log.Info($"LIVE guest: applied {status.Why}: {status.Ops.Count} queue steps, " +
+            Log.Info($"LIVE guest: applied {status.Why}{(status.Partial ? " (partial)" : "")}: {status.Ops.Count} queue steps, " +
                      $"{status.Company.Set.Count + status.Company.Removed.Count} company stats, {status.Pilots.Count} pilots");
 
-            // Check only when nothing of ours is still on its way to the host or waiting here.
-            if (ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates || pendingMarket != null) return;
+            // Check only when nothing of ours is still on its way to the host or waiting here, and
+            // the host had settled (a partial status's travel and shops come in the next one).
+            if (status.Partial || ShipRequests.PendingRequests > 0 || ShipRequests.HasQueuedUpdates || pendingMarket != null) return;
+            CheckFingerprint(sim, status, missing);
+        }
+
+        // The host's route, jump, travel state and time, and travel order.
+        private static void ApplyTravel(SimGameState sim, CompanyStatus status)
+        {
+            FollowTravel(sim, status);
+            // Travel isn't a company stat: the host's travel state (docked, in transit...) and
+            // time left. ForceTravelState is the state machine's own direct setter (it also
+            // updates the travel-related company stats); the stats below then match the host.
+            var travel = (SimGameTravelStatus)status.TravelState;
+            if ((int)sim.TravelState != status.TravelState && sim.TravelManager != null
+                && travel != SimGameTravelStatus.TRANSITION_ANIMATING && travel != SimGameTravelStatus.UNKNOWN)
+            {
+                Log.Info($"LIVE guest: travel {sim.TravelState} -> {(SimGameTravelStatus)status.TravelState}");
+                sim.TravelManager.ForceTravelState(travel);
+            }
+            if (sim.TravelTime != status.TravelTime) sim.SetTravelTime(status.TravelTime, "coop");
+            // The travel order with its legs, as the host's (the redraw refreshes the timeline).
+            SyncTravelOrder(sim, status.TravelOrder);
+        }
+
+        private static void CheckFingerprint(SimGameState sim, CompanyStatus status, List<string> missing)
+        {
             var sections = FingerprintSections(sim);
             var mine = CompanyFingerprint.Hash(sections);
             if (mine == status.Fingerprint) return;
@@ -544,10 +624,12 @@ namespace BattletechCoop.Sync
             {
                 inDay = false; // OnDayPassed threw before its postfix: never record across frames
                 if (!HostLive(out _, out var sim)) return;
-                SendHeld(sim);
-                if (DateTime.UtcNow < nextCheck) return;
+                var settled = Settled(sim);
+                // A settled status owed after a partial one goes out as soon as the host settles.
+                if (DateTime.UtcNow < nextCheck && !(gate.Owed && settled)) return;
                 nextCheck = DateTime.UtcNow + CheckInterval;
-                if (heldWhy == null && Settled(sim) && Fingerprint(sim) != baseFingerprint) Send(sim, "company change", new List<byte>());
+                if (gate.CheckDue(settled, settled && Fingerprint(sim) != baseFingerprint))
+                    Send(sim, gate.Owed ? "settled" : "company change", new List<byte>(), false);
             }
             // Guest: statuses are applied by ShipRequests.ProcessInbox (every frame); a market
             // waits here for this copy's shops to finish loading.

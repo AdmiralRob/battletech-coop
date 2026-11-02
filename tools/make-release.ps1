@@ -124,8 +124,11 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
-Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.20)
+Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.21)
 -------------------------------------------------------------------------
+0.0.21: the travel entry on the friend's schedule now counts down day by day with the host's,
+starting a trip no longer fails when the friend hasn't opened the starmap, and a refit the
+host accepts during a jump no longer gets progress for a day that passed before it.
 0.0.20: travelling no longer makes the friend's game reload the ship (black screen) when the
 host presses Go, at each jump, or after travel events. The friend's ship follows the host's
 route and jumps, and the Store and Hiring Hall in the new system show the host's stock and

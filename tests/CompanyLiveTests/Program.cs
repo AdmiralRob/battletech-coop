@@ -32,12 +32,25 @@ static class Program
     static List<KeyValuePair<string, string>> Sections(string system = "starsystemdef_Claybrooke", int travelState = 0, int travelTime = 0,
                                                        string[] mechLab = null, int day = 42, Dictionary<string, StatValue> company = null,
                                                        int financeLeft = 29, int travelOrderLeft = -1,
-                                                       string[] route = null, int travelIndex = 0, string[] market = null) =>
+                                                       string[] route = null, int travelIndex = 0, string[] market = null,
+                                                       TravelOrderData travelOrder = null) =>
         CompanyFingerprint.Sections(day, 10, system, travelState, travelTime,
             company ?? Stats(("Funds", StatValue.Of(1000000))),
             new[] { new CompanyFingerprint.PilotEntry { Guid = "SGRef_12", Callsign = "Nines", Stats = Stats(("ExperienceUnspent", StatValue.Of(500))) } },
             new[] { "0 mech1 'Blackjack'" }, mechLab ?? new[] { "WorkOrderEntry_MechLab mech1 3" }, new string[0], financeLeft, travelOrderLeft,
-            route, travelIndex, market ?? new[] { "shop 0 refresh 11", "item 0 Weapon_Laser_MediumLaser_0-STOCK Weapon 3 False False 1", "forhire refresh 11", "forhire pilot_gen_1" });
+            route, travelIndex, market ?? new[] { "shop 0 refresh 11", "item 0 Weapon_Laser_MediumLaser_0-STOCK Weapon 3 False False 1", "forhire refresh 11", "forhire pilot_gen_1" },
+            travelOrder?.Lines());
+    // A trip as Starmap.OnPathfindingComplete makes it: a cost-0 parent and one leg per stage,
+    // paid leg by leg (WorkOrderEntry.PayCost pays the SubEntries first).
+    static TravelOrderData Trip(int toJumpPoint, int paidOnFirstLeg)
+    {
+        var t = new TravelOrderData();
+        t.Root.Type = 30; t.Root.Id = "Travel"; t.Root.Description = "Travel to Mithron";
+        t.Legs.Add(new TravelOrderData.Entry { Type = 31, Id = "Travel", Description = "Travel to Brockway Jump Point", Cost = toJumpPoint, Paid = paidOnFirstLeg });
+        t.Legs.Add(new TravelOrderData.Entry { Type = 32, Id = "Travel", Description = "Jumping to Mithron", Cost = 0 });
+        t.Legs.Add(new TravelOrderData.Entry { Type = 33, Id = "Travel", Description = "Traveling to Mithron System", Cost = 4 });
+        return t;
+    }
     static bool Same(IDictionary<string, StatValue> a, IDictionary<string, StatValue> b) =>
         a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var v) && v.Equals(kv.Value));
 
@@ -289,13 +302,15 @@ static class Program
             Check(CompanyFingerprint.Hash(Sections(travelOrderLeft: -1)) != CompanyFingerprint.Hash(Sections(travelOrderLeft: 0)), "no order vs finished order");
         });
 
-        Test("timeline entries survive the wire; none is -1", () =>
+        Test("timeline entries survive the wire; none is -1 / null", () =>
         {
-            var s = new CompanyStatus { FinanceCost = 90, FinancePaid = 61, TravelOrderCost = 6, TravelOrderPaid = 1 };
+            var s = new CompanyStatus { FinanceCost = 90, FinancePaid = 61, TravelOrder = Trip(6, 1) };
             var back = CompanyStatus.Decode(s.Encode());
-            Check(back.FinanceCost == 90 && back.FinancePaid == 61 && back.TravelOrderCost == 6 && back.TravelOrderPaid == 1, "entries changed");
+            Check(back.FinanceCost == 90 && back.FinancePaid == 61, "finance entry changed");
+            Check(back.TravelOrder != null && back.TravelOrder.Lines().SequenceEqual(s.TravelOrder.Lines())
+                  && back.TravelOrder.Legs[1].Description == "Jumping to Mithron" && back.TravelOrder.Root.Id == "Travel", "travel order changed");
             var none = CompanyStatus.Decode(new CompanyStatus().Encode());
-            Check(none.FinanceCost == -1 && none.TravelOrderCost == -1, "missing entries not -1");
+            Check(none.FinanceCost == -1 && none.TravelOrder == null && !none.Partial, "missing entries not -1 / null");
         });
 
         // ---- Live test 2026-11-01 (0.0.19): reloads on Go and at the jump ----
@@ -337,6 +352,53 @@ static class Program
                   && back.Market.Pilots.SequenceEqual(m.Pilots) && back.Market.PilotsRefreshDay == 18, "market changed on the wire");
             Check(CompanyStatus.Decode(new CompanyStatus().Encode()).Market == null, "an unchanged market was sent");
         });
+
+        // ---- PR #3 review 3 (0.0.20) ----
+        Test("review repro: a day pays a travel leg, not the parent -> the leg's payment is sent and checked", () =>
+        {
+            var host = Trip(6, 1); var guest = Trip(6, 0);                   // parent 0/0 on both
+            Check(host.Root.Cost == guest.Root.Cost && host.Root.Paid == guest.Root.Paid, "setup");
+            var diff = CompanyFingerprint.Differing(CompanyFingerprint.SectionHashes(Sections(travelOrder: host)),
+                                                    CompanyFingerprint.SectionHashes(Sections(travelOrder: guest)));
+            Check(diff.Count == 1 && diff[0] == "travel", string.Join(",", diff));
+            var back = CompanyStatus.Decode(new CompanyStatus { TravelOrder = host }.Encode()).TravelOrder;
+            Check(back.Legs[0].Paid == 1, "leg payment lost on the wire");
+        });
+
+        Test("review repro: the same trip only takes payments; another trip's legs are rebuilt", () =>
+        {
+            var host = Trip(6, 2);
+            Check(host.SameShape(30, new[] { 31, 32, 33 }), "same trip seen as different");
+            Check(!host.SameShape(30, new[] { 33 }), "a shorter trip (no jump) seen as the same");
+            Check(!host.SameShape(30, new int[0]), "a planned-only order with no legs seen as the same");
+        });
+
+        Test("travel order fingerprint ignores descriptions (localized), not payments", () =>
+        {
+            var a = Trip(6, 1); var b = Trip(6, 1);
+            b.Legs[1].Description = "Sprung nach Mithron";
+            Check(a.Lines().SequenceEqual(b.Lines()), "description in the fingerprint");
+        });
+
+        Test("review repro: a day the host ends unsettled goes out at once, before a refit it accepts later", () =>
+        {
+            var gate = new HostStatusGate();
+            var guest = new MechBay();
+            var inbox = new GuestInbox();
+            var partial = gate.DayEnded(settled: false);                  // jump animation playing
+            Check(partial && gate.Owed, "an unsettled day isn't partial");
+            inbox.Add(GuestInbox.Kind.CompanyStatus, MechBay.Day);        // sent now, not held at the host
+            inbox.Add(GuestInbox.Kind.ShipUpdate, MechBay.AddRefit(3));    // the host accepts a refit afterwards
+            guest.Process(inbox, editing: false);
+            Check(guest.Describe() == "3", $"the refit got progress for a day before it existed: {guest.Describe()}");
+            Check(!gate.CheckDue(settled: false, changed: true), "a status sent before settling");
+            Check(gate.CheckDue(settled: true, changed: false), "no settled status after a partial one");
+            gate.SentSettled();
+            Check(!gate.CheckDue(settled: true, changed: false) && !gate.DayEnded(settled: true), "settled days owe nothing");
+        });
+
+        Test("the partial flag survives the wire", () =>
+            Check(CompanyStatus.Decode(new CompanyStatus { Partial = true }.Encode()).Partial, "partial lost"));
 
         Console.WriteLine($"{passed}/{passed + failed} passed");
         return failed == 0 ? 0 : 1;

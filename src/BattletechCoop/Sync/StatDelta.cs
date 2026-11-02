@@ -115,8 +115,15 @@ namespace BattletechCoop.Sync
         public readonly List<byte> Ops = new List<byte>();
         public int DaysPassed, DayRemainingInQuarter;
         public int TravelState, TravelTime;
-        // Timeline entries (WorkOrderEntry Cost/PaidCost), or -1 when the host has none.
-        public int FinanceCost = -1, FinancePaid = -1, TravelOrderCost = -1, TravelOrderPaid = -1;
+        // The quarterly finance report's timeline entry (WorkOrderEntry Cost/PaidCost), or -1
+        // when the host has none.
+        public int FinanceCost = -1, FinancePaid = -1;
+        // The travel order with its legs (null when the host isn't travelling).
+        public TravelOrderData TravelOrder;
+        // Sent before the host settled (a jump animation playing, a new system's shops still
+        // loading): the guest applies the day's steps and stats but not travel or the market, and
+        // doesn't compare fingerprints. A settled status always follows (PR #3 review 3).
+        public bool Partial;
         // Where the host is and where it's going: the current system, the route (system IDs of
         // Starmap.ActivePath) and how far along it is (Starmap travelIndex).
         public string SystemId = "";
@@ -150,13 +157,16 @@ namespace BattletechCoop.Sync
                 w.Write(TravelTime);
                 w.Write((byte)SectionHashes.Count);
                 foreach (var h in SectionHashes) w.Write(h);
-                w.Write(FinanceCost); w.Write(FinancePaid); w.Write(TravelOrderCost); w.Write(TravelOrderPaid);
+                w.Write(FinanceCost); w.Write(FinancePaid);
+                w.Write(TravelOrder != null);
+                TravelOrder?.Write(w);
                 w.Write(SystemId ?? "");
                 w.Write(TravelIndex);
                 w.Write(Route.Count);
                 foreach (var id in Route) w.Write(id);
                 w.Write(Market != null);
                 Market?.Write(w);
+                w.Write(Partial);
                 w.Flush();
                 return ms.ToArray();
             }
@@ -180,12 +190,13 @@ namespace BattletechCoop.Sync
                 var sections = r.ReadByte();
                 for (var i = 0; i < sections; i++) s.SectionHashes.Add(r.ReadUInt32());
                 s.FinanceCost = r.ReadInt32(); s.FinancePaid = r.ReadInt32();
-                s.TravelOrderCost = r.ReadInt32(); s.TravelOrderPaid = r.ReadInt32();
+                if (r.ReadBoolean()) s.TravelOrder = TravelOrderData.Read(r);
                 s.SystemId = r.ReadString();
                 s.TravelIndex = r.ReadInt32();
                 var route = r.ReadInt32();
                 for (var i = 0; i < route; i++) s.Route.Add(r.ReadString());
                 if (r.ReadBoolean()) s.Market = MarketData.Read(r);
+                s.Partial = r.ReadBoolean();
                 return s;
             }
         }
@@ -229,7 +240,8 @@ namespace BattletechCoop.Sync
             IDictionary<string, StatValue> company, IEnumerable<PilotEntry> pilots,
             IEnumerable<string> bays, IEnumerable<string> mechLab, IEnumerable<string> medBay,
             int financeLeft = -1, int travelOrderLeft = -1,
-            IEnumerable<string> route = null, int travelIndex = 0, IEnumerable<string> market = null)
+            IEnumerable<string> route = null, int travelIndex = 0, IEnumerable<string> market = null,
+            IEnumerable<string> travelOrder = null)
         {
             var list = new List<KeyValuePair<string, string>>();
             void Add(string name, System.Text.StringBuilder text) => list.Add(new KeyValuePair<string, string>(name, text.ToString()));
@@ -241,7 +253,8 @@ namespace BattletechCoop.Sync
             Add("system", New().Append("system ").Append(systemId ?? "(none)").Append('\n'));
             Add("travel", New().Append("travel ").Append(travelState).Append(" time ").Append(travelTime)
                                .Append(" order ").Append(travelOrderLeft).Append(" index ").Append(travelIndex)
-                               .Append(" route ").Append(string.Join(">", (route ?? Enumerable.Empty<string>()).ToArray())).Append('\n'));
+                               .Append(" route ").Append(string.Join(">", (route ?? Enumerable.Empty<string>()).ToArray())).Append('\n')
+                               .Append(string.Concat((travelOrder ?? Enumerable.Empty<string>()).Select(l => l + "\n").ToArray())));
             sb = New();
             foreach (var kv in company.Where(kv => !IsLocalPresentation(kv.Key)).OrderBy(kv => kv.Key, StringComparer.Ordinal))
                 sb.Append("c ").Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
@@ -273,6 +286,79 @@ namespace BattletechCoop.Sync
                 return SectionNames.ToList();
             return SectionNames.Where((n, i) => host[i] != mine[i]).ToList();
         }
+    }
+
+    // The host's travel order: Starmap.OnPathfindingComplete makes a WorkOrderEntry_TravelGeneric
+    // (cost 0) with one leg per stage as SubEntries (TravelToJumpPoint, TravelJumping,
+    // TravelToSystem). The game's PayCost pays the legs first and GetRemainingCost sums them, so
+    // a day's travel moves a leg's PaidCost, not the parent's (PR #3 review 3). Type is the
+    // WorkOrderType (30-33).
+    internal sealed class TravelOrderData
+    {
+        public sealed class Entry
+        {
+            public int Type, Cost, Paid;
+            public string Id = "", Description = "";
+        }
+
+        public readonly Entry Root = new Entry();
+        public readonly List<Entry> Legs = new List<Entry>();
+
+        // For the fingerprint: types and payments, not the (localized) descriptions.
+        public IEnumerable<string> Lines()
+        {
+            yield return $"order {Root.Type} {Root.Cost} {Root.Paid}";
+            for (var i = 0; i < Legs.Count; i++) yield return $"leg {i} {Legs[i].Type} {Legs[i].Cost} {Legs[i].Paid}";
+        }
+
+        // Same entries in the same order, whatever has been paid.
+        public bool SameShape(int rootType, IList<int> legTypes) =>
+            rootType == Root.Type && legTypes.Count == Legs.Count && Legs.Select(l => l.Type).SequenceEqual(legTypes);
+
+        private static void WriteEntry(BinaryWriter w, Entry e)
+        {
+            w.Write(e.Type); w.Write(e.Id ?? ""); w.Write(e.Description ?? ""); w.Write(e.Cost); w.Write(e.Paid);
+        }
+
+        private static Entry ReadEntry(BinaryReader r) =>
+            new Entry { Type = r.ReadInt32(), Id = r.ReadString(), Description = r.ReadString(), Cost = r.ReadInt32(), Paid = r.ReadInt32() };
+
+        public void Write(BinaryWriter w)
+        {
+            WriteEntry(w, Root);
+            w.Write(Legs.Count);
+            foreach (var leg in Legs) WriteEntry(w, leg);
+        }
+
+        public static TravelOrderData Read(BinaryReader r)
+        {
+            var t = new TravelOrderData();
+            var root = ReadEntry(r);
+            t.Root.Type = root.Type; t.Root.Id = root.Id; t.Root.Description = root.Description; t.Root.Cost = root.Cost; t.Root.Paid = root.Paid;
+            var n = r.ReadInt32();
+            for (var i = 0; i < n; i++) t.Legs.Add(ReadEntry(r));
+            return t;
+        }
+    }
+
+    // Host: when company statuses go out (PR #3 review 3). A day's status is sent as soon as the
+    // day ends, in order with the host's other ship messages, so nothing sent later (a refit the
+    // host accepts, its own changes) can overtake it. If the host isn't settled yet, that status
+    // is partial and a settled one is owed as soon as it is.
+    internal sealed class HostStatusGate
+    {
+        public bool Owed { get; private set; }
+
+        // Returns whether the day's status is partial.
+        public bool DayEnded(bool settled)
+        {
+            if (!settled) Owed = true;
+            return !settled;
+        }
+
+        public bool CheckDue(bool settled, bool changed) => settled && (Owed || changed);
+        public void SentSettled() => Owed = false;
+        public void Reset() => Owed = false;
     }
 
     // A system's store stock (system, faction and black-market shops) and pilots for hire, as the
