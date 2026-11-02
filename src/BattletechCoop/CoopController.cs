@@ -206,7 +206,11 @@ namespace BattletechCoop
             session.PlayerJoined += p =>
             {
                 Notify($"{p.Name} is player {p.Index}");
-                if (session.Role == SessionRole.Host && p.Index != 0) Sync.ShipView.MarkDirty($"{p.Name} joined");
+                if (session.Role == SessionRole.Host && p.Index != 0)
+                {
+                    Sync.ShipView.MarkDirty($"{p.Name} joined");
+                    Sync.SettingsSync.OnGuestJoined(session, p.Index);
+                }
             };
             session.PlayerLeft += (p, reason) => Notify($"{p.Name} left: {reason}");
             session.Closed += reason => OnSessionClosed(session, reason);
@@ -220,6 +224,7 @@ namespace BattletechCoop
             Notify("Session ended: " + reason);
             Sync.CombatSync.ResetForSessionEnd();
             Sync.ShipView.Reset();
+            Sync.SettingsSync.Reset();
             // A guest left inside the host's battle or campaign would keep playing a copy that
             // can't affect anything ("ghost campaign"): go back to the main menu shortly after.
             if (session.Role == SessionRole.Guest && Sync.CombatSync.GuestInHostGame && !Sync.AutoSkirmish.MainMenuShowing)
@@ -265,6 +270,12 @@ namespace BattletechCoop
                 Sync.ShipRequests.HandleGameMessage(Session, sender, channel, payload);
                 return;
             }
+            // Must come before the combat range below, which takes every other channel from 10 up.
+            if (channel == Sync.SettingsSync.Channel)
+            {
+                Sync.SettingsSync.HandleGameMessage(Session, sender, payload);
+                return;
+            }
             if (channel >= Sync.CombatSync.ChannelCombatStart)
             {
                 Sync.CombatSync.HandleGameMessage(Session, sender, channel, payload);
@@ -302,6 +313,9 @@ namespace BattletechCoop
             if (parts.Length == 2 && parts[0] == "+connect_lobby" && ulong.TryParse(parts[1], out lobby))
                 JoinSteam(lobby);
         }
+
+        // For sync modules: the same short notice the overlay shows for session events.
+        internal void Notice(string message) => Notify(message);
 
         private void Notify(string message)
         {

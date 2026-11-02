@@ -34,9 +34,10 @@ Two players (later 3–4) play one BattleTech Career together.
 
 | Branch | Pair | Status |
 |---|---|---|
-| `fix/guest-hud-orders` | Rob + Claude | Root cause found, see below |
+| `codex/0.0.14-movement-fix` | Morgan + ChatGPT | Merged (PR #1); in live testing |
+| `feature/settings-sync` | Rob + Claude | Host's combat pacing settings apply on the guest |
 | `feature/ship-navigation` | Morgan + ChatGPT (proposed) | Design in Morgan's proposal |
-| `feature/split-lance-2x2` | TBD | After the HUD fix |
+| `feature/split-lance-2x2` | TBD | After the movement fix is confirmed live |
 
 ### Reserved message channels
 
@@ -48,7 +49,8 @@ dispatched explicitly.
 |---|---|
 | 29–31 | Ship navigation |
 | 32–34 | Lance ownership |
-| 35–39 | Spare; claim here before use |
+| 35 | Settings sync (`SettingsSync.Channel`) |
+| 36–39 | Spare; claim here before use |
 
 ## Phases
 
@@ -87,7 +89,8 @@ both games ran the same illegal orders.
   `OrderSequence.OnComplete` sets `HasFiredThisRound`, on both machines. But nothing checks
   these flags when an order arrives, and `CombatSync.ValidateRequest` does no legality check.
 
-**Fix plan (`fix/guest-hud-orders`):**
+**Fix:** implemented by Morgan + ChatGPT in PR #1 (`codex/0.0.14-movement-fix`), with the DFA case
+added after review. Live testing on 2026-11-01 looked good so far. The original plan was:
 
 1. **Guest:** remember the `SelectionState` that published the outstanding request. When the
    host streams that order back (`G<player>.<n>`) and it runs on the guest, capture its
@@ -100,6 +103,30 @@ both games ran the same illegal orders.
 3. **Check before merging:** the free-move phase (non-interleaved, before contact) re-allows
    movement. Confirm how the game resets `HasMovedThisRound` there, so the guard doesn't block
    legal re-moves.
+
+## Feature: settings sync (2026-11-01)
+
+Rob's decisions:
+- **What syncs:** the host's combat pacing and cinematic settings from Options > Game: speed up
+  combat, attack cam, target cam, move/sprint follow, auto/cinematic zoom chance, and
+  enemy/melee/jump cinematics.
+- **What doesn't:** camera speeds, invert, cursor lock, volume and keybinds stay personal.
+- **How it applies:** the host's values hold on the guest for the session only. Each player
+  still steers their own camera.
+
+Design (`Sync/SettingsSync.cs`):
+
+- **Why it's safe:** none of these settings touch the lockstep state. The cinematic chances use
+  `UnityEngine.Random` (`CameraControl.ShowAttackCam`), and `speedUpCombat` only changes timing
+  (`StackManager.Update`).
+- **When the host sends:**
+  - on guest join;
+  - after any `UserSettings.Save` that changed one of these values.
+- **Guest settings are protected.** The values live in `CloudUserSettings` (Steam Cloud). On the
+  guest, a prefix on `UserSettings.Save` serializes the guest's own values and keeps any edit
+  the guest made mid-session. The postfix then puts the host's values back. Serialization is
+  synchronous inside `Save`, so the swap covers it.
+- **The guest's own values return** when the session closes.
 
 ## Open questions
 
