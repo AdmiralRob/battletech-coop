@@ -124,11 +124,12 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
-Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.22)
+Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.23)
 -------------------------------------------------------------------------
-0.0.22: after a jump the friend's Store and Hiring Hall now stay as the host's (before, the
+0.0.22/0.0.23: after a jump the friend's Store and Hiring Hall now stay as the host's (before, the
 friend's game replaced them with its own a moment later, which forced a reload), and a reload
-waits a few seconds after a jump so it can't get stuck on the loading screen.
+no longer gets stuck on the loading screen (a game error in the Barracks button's Hiring Hall
+menu stopped the reload from finishing).
 0.0.21: the travel entry on the friend's schedule now counts down day by day with the host's,
 starting a trip no longer fails when the friend hasn't opened the starmap, and a refit the
 host accepts during a jump no longer gets progress for a day that passed before it.

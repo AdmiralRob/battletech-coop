@@ -417,7 +417,7 @@ namespace BattletechCoop.Sync
         // Mid-animation (a jump playing) the travel state is in between; a status taken then would
         // tell the guest to force that in-between state. Wait for the animation to finish.
         // Likewise, after arriving the new system's shops are still loading (Shop.IsPending).
-        private static bool Settled(SimGameState sim) =>
+        internal static bool Settled(SimGameState sim) =>
             sim.TravelState != SimGameTravelStatus.TRANSITION_ANIMATING && sim.TravelState != SimGameTravelStatus.UNKNOWN
             && !AnyShopPending(sim);
 

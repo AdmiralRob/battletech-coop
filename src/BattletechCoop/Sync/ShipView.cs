@@ -5,6 +5,7 @@ using System.Text;
 using BattleTech;
 using BattleTech.Save;
 using BattleTech.Save.SaveGameStructure;
+using BattleTech.UI;
 using BattletechCoop.Net;
 using Harmony;
 using HBS;
@@ -98,6 +99,9 @@ namespace BattletechCoop.Sync
             // popup is open. A ship sent before that is missing them, and later pilot training
             // updates fail on the guest for lack of XP (seen 2026-11-01).
             if (game.Simulation.CompletedContract != null) return;
+            // Not mid-jump or while the new system's shops are still loading: the ship would carry
+            // a half-made system (live statuses wait for the same thing).
+            if (!CompanyLive.Settled(game.Simulation)) return;
 
             dirty = false;
             urgent = false;
@@ -250,6 +254,34 @@ namespace BattletechCoop.Sync
                 w.Flush();
                 return stream.ToArray();
             }
+        }
+    }
+
+    // Live test 2026-11-05: the guest's catch-up ship, loaded right after a jump, never finished.
+    // Its battletech_log.txt: a NullReferenceException in SGNavigationButton.ManageHiringHallFlyout
+    // (SimGameState._OnAttachUXComplete -> SGRoomManager.OnSimGameReady -> RefreshDisplay ->
+    // SGNavigationList.RefreshButtonStates), which aborted _OnAttachUXComplete, so the load
+    // never completed. The method only decides whether the Barracks button gets a Hiring Hall
+    // flyout, from simState.CurSystem's owner reputation and AvailablePilots.Count; skip it while
+    // any of those isn't there yet (the next redraw adds the flyout) and log which one it was.
+    [HarmonyPatch(typeof(SGNavigationButton), "ManageHiringHallFlyout")]
+    public static class HiringHallFlyoutGuardPatch
+    {
+        static bool Prefix(SGNavigationButton __instance)
+        {
+            string missing;
+            try
+            {
+                var sim = Traverse.Create(__instance).Field("simState").GetValue<SimGameState>();
+                var system = sim?.CurSystem;
+                missing = sim == null ? "company" : system == null ? "current system"
+                    : system.Def == null ? "system def" : system.AvailablePilots == null ? "pilots for hire"
+                    : system.OwnerValue == null ? "system owner" : null;
+            }
+            catch (Exception e) { missing = e.GetType().Name; }
+            if (missing == null) return true;
+            Log.Info($"UI: Hiring Hall flyout skipped ({missing} not there yet)");
+            return false;
         }
     }
 

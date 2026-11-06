@@ -268,7 +268,7 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
   - Checked against the real DLL: the built trip's types, parents and remaining cost; a day's
     `PayCost` paying the first leg with the parent at 0/0; the guest's legs taking the host's
     payments through two stages; the `Starmap` members set.
-- **Live test 2026-11-05 (0.0.21), fixed in 0.0.22:** travel worked (route, partial/settled
+- **Live test 2026-11-05 (0.0.21), fixed in 0.0.22 and 0.0.23:** travel worked (route, partial/settled
   days, jump, market applied), but right after the jump to Renfield the guest's store and hiring
   hall differed and the catch-up reload never finished.
   - *Market overwritten.* After a jump the game makes its own market late:
@@ -280,8 +280,14 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
   - *Reload stuck.* The catch-up ship arrived ~3 s after the jump and its load never reached
     `_OnAttachUXComplete`. A ship now waits 8 s after a followed jump and while the
     `DataManager` is loading (at most 30 s); a load still unfinished after 90 s is logged and
-    tells the player which logs to send. Root cause still to confirm from the guest's
-    `battletech_log.txt`.
+    tells the player which logs to send.
+  - *Root cause of the stuck reload* (guest `battletech_log.txt`): a `NullReferenceException` in
+    `SGNavigationButton.ManageHiringHallFlyout`, called from `_OnAttachUXComplete` →
+    `SGRoomManager.OnSimGameReady` → `RefreshDisplay`. It aborted `_OnAttachUXComplete`, so the
+    loaded ship never finished attaching. A prefix now skips that method (it only adds the
+    Barracks button's Hiring Hall flyout) when its sim, current system, def, pilots or owner
+    is missing, and logs which. The host also no longer sends a full ship until it has settled
+    (`CompanyLive.Settled`: no jump animation, shops not pending).
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - the contract list of a new system;
