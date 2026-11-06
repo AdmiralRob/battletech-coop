@@ -42,7 +42,7 @@ Two players (later 3–4) play one BattleTech Career together.
 | `feature/settings-sync` | Rob + Claude | PR #2: host's combat pacing settings apply on the guest |
 | `feature/live-company` | Rob + Claude | Guest's copy of the company keeps up live (builds on PR #2) |
 | `feature/ship-navigation` | Morgan + ChatGPT (proposed) | Design in Morgan's proposal |
-| `feature/split-lance-2x2` | TBD | After the movement fix is confirmed live |
+| `feature/split-lance-2x2` | Rob + Claude | Started 2026-11-06 (builds on `feature/live-company`); test builds are `0.1.0-lances.N` |
 
 ### Reserved message channels
 
@@ -53,7 +53,9 @@ dispatched explicitly.
 | Range | Feature |
 |---|---|
 | 29–31 | Ship navigation |
-| 32–34 | Lance ownership |
+| 32 | Lance ownership: unit → player table (`LanceOwners.Channel`) |
+| 33 | Lance picking (planned) |
+| 34 | Spare for lance work |
 | 35 | Settings sync (`SettingsSync.Channel`) |
 | 36 | Live company updates (`CompanyLive.Channel`) |
 | 37–39 | Spare; claim here before use |
@@ -109,6 +111,73 @@ added after review. Live testing on 2026-11-01 looked good so far. The original 
 3. **Check before merging:** the free-move phase (non-interleaved, before contact) re-allows
    movement. Confirm how the game resets `HasMovedThisRound` there, so the guard doesn't block
    legal re-moves.
+
+## Feature: split lance (2+2), started 2026-11-06
+
+Rob's decisions:
+- **Split:** the vanilla 4-'Mech lance, 2 + 2. Bigger drops come later (phase 5).
+- **Picking order:** the host picks their own 'Mechs first, then the guest picks theirs.
+- **Control:** each player commands only their own units. If a player disconnects, the host
+  takes over their units.
+
+**How we work on it:** `feature/split-lance-2x2` branches from `feature/live-company`. Bug fixes
+land on `feature/live-company` first and are merged into the lance branch, never the other way.
+Play sessions test one build at a time: bug-fix builds are `0.0.N`, lance builds
+`0.1.0-lances.N`. Merge order: PR #2 → PR #3 → the lance PR (rebased onto `main`).
+
+### Slice 1: ownership in battle (done, untested in game)
+
+- **Who owns what** (`Sync/LanceOwnership.cs`, Unity-free): the lance configuration's slots split
+  evenly in slot order, so slots 1–2 are the host's and 3–4 the guest's. A unit's slot comes from
+  its pilot (`SpawnableUnit.PilotId` in `Contract.Lances.GetLanceUnitsIncludeEmptySlots(player
+  team)` vs. the actor's `pilotDef.Description.Id`), so an empty host slot doesn't shift the
+  guest's 'Mechs. A configuration listing fewer than four slots is padded to four.
+- **Table** (`Sync/LanceOwners.cs`): the host builds it once the player lance has spawned (by the
+  briefing) and sends it on channel 32. The guest keeps it for the battle with that combat ID.
+  Autoplay test modes keep shared control (the AI drives the player team).
+- **Which unit an order is for:** the first string property among `ActorGUID`, `MechGUID`,
+  `SourceGUID`, `targetGUID`. Checked against every `InvocationMessage` type in build
+  20387569 (move/sprint, jump, melee, stand, startup, attack, DFA, sensor lock, active probe,
+  eject, mortar, vigilance, Done/reserve, vent, inspire). `SubAttackInvocation` and team-level
+  orders name no unit and aren't restricted.
+- **Where it's enforced:**
+  - Guest HUD orders (`RequestOrder` with a `SelectionState`): refused locally with a notice.
+  - Every guest request on the host (`RunGuestOrder`): refused with the reason sent back.
+  - Host HUD orders (`SelectionState.PublishInvocation` → `AllowHostOrder`): refused with a
+    notice. Not in `GenericInvoke`: that also runs orders the game makes itself and accepted
+    guest orders.
+- **Disconnect:** a unit whose owner has left is commanded by the host (the host is told once).
+  A guest never takes over the host's units; if the host leaves, the session ends anyway.
+- **Known gap:** host HUD actions the game publishes straight to the `MessageCenter` (not through
+  `SelectionState`) aren't ownership-checked on the host. Guest ones are, by `RunGuestOrder`.
+- **Until slice 2:** the host fills all four slots, putting the guest's two 'Mechs in slots 3–4.
+
+### Slice 2: picking in order (next)
+
+The lance configuration screen already supports locked slots (`LanceLoadoutSlot.SetLockState`,
+`SetLockedData`, used by contracts with required units). Plan:
+
+1. The host accepts a contract. In its lance configuration, slots 3–4 are locked and labelled
+   "HCASE picks", and the launch button is disabled until the guest has picked.
+2. When the host has filled slots 1–2 and clicks "Hand over to HCASE", the host sends its two
+   picks and the eligible 'Mechs and pilots (ready, not deployed, not picked) on channel 33.
+3. The guest gets a picker. The preferred option is the game's own `LanceConfiguratorPanel`
+   with slots 1–2 locked to the host's picks (`SetLockedData`). If the panel can't be opened
+   outside the contract flow, a list in the co-op window is the fallback.
+4. The guest confirms. The host fills slots 3–4 with the guest's picks via `SetLockedData` and
+   checks them (still ready, tonnage limits), then the host launches.
+5. If the guest leaves or cancels, the host's slots 3–4 unlock and the host can fill them.
+
+Open questions: whether the host may still change slots 1–2 after handing over (proposed: it
+can, and that sends the guest its new picks), and how the screen shows the guest which of their
+'Mechs need repairs.
+
+### Slice 3: HUD polish (later)
+
+- Mark the partner's units on the portraits and the initiative track.
+- Selecting a partner's unit shows it, but its order buttons are greyed out (now the order is
+  refused with a notice).
+- Optionally, the camera follows the partner's unit while it acts.
 
 ## Feature: settings sync (2026-11-01)
 
