@@ -277,6 +277,11 @@ namespace BattletechCoop
                 Sync.SettingsSync.HandleGameMessage(Session, sender, payload);
                 return;
             }
+            if (channel == Sync.LanceOwners.Channel)
+            {
+                Sync.LanceOwners.HandleGameMessage(Session, sender, payload);
+                return;
+            }
             if (channel == Sync.CompanyLive.Channel)
             {
                 Sync.CompanyLive.HandleGameMessage(Session, sender, payload);
