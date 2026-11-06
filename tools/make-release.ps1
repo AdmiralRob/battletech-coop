@@ -124,8 +124,10 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
-Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.23)
+Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.24)
 -------------------------------------------------------------------------
+0.0.24: arriving in a system no longer makes the friend's game reload, and a reload no longer
+leaves the friend in the Navigation room without menus.
 0.0.22/0.0.23: after a jump the friend's Store and Hiring Hall now stay as the host's (before, the
 friend's game replaced them with its own a moment later, which forced a reload), and a reload
 no longer gets stuck on the loading screen (a game error in the Barracks button's Hiring Hall

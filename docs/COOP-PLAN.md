@@ -288,6 +288,17 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
     Barracks button's Hiring Hall flyout) when its sim, current system, def, pilots or owner
     is missing, and logs which. The host also no longer sends a full ship until it has settled
     (`CompanyLive.Settled`: no jump animation, shops not pending).
+- **Second test 2026-11-05 (0.0.23), fixed in 0.0.24:**
+  - *Arrival not followed.* The host's `SGTravelManager.HandleNextTravelStep` runs
+    `Starmap.CompletedTravelClear` on arrival (`ActivePath`, `TravelOrder`, `TravelItem` to null);
+    the guest kept its route, so `travel` differed and it reloaded. The guest now does the same
+    when the host's route is empty, and always takes the host's travel index.
+  - *Reload aborted again,* one line later: `ManageShopFlyout`, with the button's `simState`
+    null. Only `SGNavigationButton.SetupElement` sets it, from `SGNavigationList.Start` with
+    `UnityGameInstance.BattleTechGame.Simulation` at the time Unity runs `Start`; after a reload
+    that can be none or the replaced sim. A prefix on `SGNavigationList.RefreshButtonStates`
+    (the only caller of `SetStateAccordingToSimDropship`, which runs both flyouts and reads
+    `simState`) points all seven buttons at the sim it is handed first.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - the contract list of a new system;

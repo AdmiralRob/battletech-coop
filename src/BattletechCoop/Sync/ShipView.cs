@@ -264,6 +264,43 @@ namespace BattletechCoop.Sync
     // never completed. The method only decides whether the Barracks button gets a Hiring Hall
     // flyout, from simState.CurSystem's owner reputation and AvailablePilots.Count; skip it while
     // any of those isn't there yet (the next redraw adds the flyout) and log which one it was.
+    //
+    // Second test, same day (0.0.23): the same abort one line later, in ManageShopFlyout, and our
+    // guard above logged "company not there yet": the button's simState itself was null. It is
+    // set only by SGNavigationButton.SetupElement, which SGNavigationList.Start calls with
+    // UnityGameInstance.BattleTechGame.Simulation, i.e. whichever sim exists when Unity first
+    // runs Start. After a reload that can be none (or the sim the load replaced), while
+    // OnSimGameReady already redraws the buttons. SGNavigationList.RefreshButtonStates (the only
+    // caller of SetStateAccordingToSimDropship, which runs both flyouts and itself reads
+    // simState) is handed the sim being shown, so the buttons are pointed at it first, as
+    // SetupElement would.
+    [HarmonyPatch(typeof(SGNavigationList), "RefreshButtonStates")]
+    public static class NavigationButtonsSimPatch
+    {
+        private static readonly string[] Buttons =
+            { "argoButton", "navigationButton", "cmdCenterButton", "mechBayButton", "barracksButton", "captainQuartersButton", "engineeringButton" };
+
+        static void Prefix(SGNavigationList __instance, SimGameState simState)
+        {
+            if (simState == null) return;
+            try
+            {
+                var fixedCount = 0;
+                foreach (var name in Buttons)
+                {
+                    var button = Traverse.Create(__instance).Field(name).GetValue<SGNavigationButton>();
+                    if (button == null) continue;
+                    var field = Traverse.Create(button).Field("simState");
+                    if (ReferenceEquals(field.GetValue<SimGameState>(), simState)) continue;
+                    field.SetValue(simState);
+                    fixedCount++;
+                }
+                if (fixedCount > 0) Log.Info($"UI: {fixedCount} navigation buttons pointed at the company being shown");
+            }
+            catch (Exception e) { Log.Error("UI: navigation buttons check", e); }
+        }
+    }
+
     [HarmonyPatch(typeof(SGNavigationButton), "ManageHiringHallFlyout")]
     public static class HiringHallFlyoutGuardPatch
     {
