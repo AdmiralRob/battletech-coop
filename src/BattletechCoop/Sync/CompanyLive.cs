@@ -302,7 +302,19 @@ namespace BattletechCoop.Sync
                 LastJumpAt = UnityEngine.Time.realtimeSinceStartup;
                 Log.Info($"LIVE guest: jumped with the host to {sim.CurSystem?.Name}");
             }
-            if (status.Route.Count > 0 && TravelIndex(sim) != status.TravelIndex)
+            // Arrived: the host's SGTravelManager.HandleNextTravelStep ran
+            // Starmap.CompletedTravelClear (TravelItem, TravelOrder and ActivePath to null, the
+            // starmap's line cleared); its travel index stays. Do the same here (live test
+            // 2026-11-05: the guest kept its route at Illiushin, so 'travel' differed and it
+            // reloaded). The travel order's timeline entry goes first, as the game's own does.
+            if (status.Route.Count == 0 && RouteIds(sim).Count > 0)
+            {
+                if (starmap.TravelOrder != null) starmap.RemoveCompletedTravelOrder();
+                try { starmap.CompletedTravelClear(); }
+                catch (NullReferenceException) when (starmap.Screen == null) { } // no starmap line to clear
+                Log.Info($"LIVE guest: arrived with the host in {sim.CurSystem?.Name}");
+            }
+            if (TravelIndex(sim) != status.TravelIndex)
                 Traverse.Create(starmap).Field("<travelIndex>k__BackingField").SetValue(status.TravelIndex);
         }
 
