@@ -36,8 +36,32 @@ namespace BattletechCoop.Sync
 
         // While a change from the other side is being applied, the capture patches stay quiet.
         private static bool applyingRemote;
-        private static readonly List<byte[]> queuedUpdates = new List<byte[]>();
+        // Guest: ship updates and company statuses from the host, in the order it sent them.
+        internal static readonly GuestInbox Inbox = new GuestInbox();
         private static bool screensDirty;
+
+        // Guest: a host change didn't apply, so this copy of the ship differs from the host's.
+        // Ask for a fresh ship, but only once the player isn't editing (see GuestEditing), and at
+        // most once per received ship so a change that can never apply can't loop.
+        private static bool healWanted, healAskedForThisShip;
+        private static string healReason = "";
+        private static float lastHealAt = -1000f;
+        private const float MinSecondsBetweenHeals = 300f; // never a reload loop
+
+        // Guest: requests sent to the host that it hasn't answered yet. While any is out, this
+        // copy is ahead of the host's, so CompanyLive skips its fingerprint check.
+        internal static int PendingRequests { get; private set; }
+        internal static bool HasQueuedUpdates => Inbox.Count > 0;
+        internal static void MarkScreensDirty() => screensDirty = true;
+
+        // Run a change that came from the host without the capture patches sending it back.
+        internal static void RunAsRemote(Action change)
+        {
+            var was = applyingRemote;
+            applyingRemote = true;
+            try { change(); }
+            finally { applyingRemote = was; }
+        }
 
         private static string Who => CoopController.Instance?.Session?.Role == SessionRole.Guest ? "guest" : "host";
 
@@ -50,7 +74,15 @@ namespace BattletechCoop.Sync
             if (session == null || session.State != SessionState.Active || CombatSync.Current != null) return null;
             var game = UnityGameInstance.BattleTechGame;
             if (game?.Simulation == null || game.Combat != null) return null;
-            if (session.Role == SessionRole.Guest) return ShipView.GuestViewing ? session : null;
+            if (session.Role == SessionRole.Guest)
+            {
+                if (!ShipView.GuestViewing) return null;
+                // Every capture starts here, in a prefix, before the game makes the change. The
+                // host made its earlier changes (and passed its earlier days) before this one, so
+                // apply everything still held first (PR #3 review).
+                ProcessInbox(true);
+                return session;
+            }
             return session.Players.Any(p => p.Index != 0) ? session : null;
         }
 
@@ -63,6 +95,7 @@ namespace BattletechCoop.Sync
             if (session.Role == SessionRole.Guest)
             {
                 session.SendGame(ChannelRequest, payload);
+                PendingRequests++;
                 Log.Info("SHIP guest: asked the host to " + what);
             }
             else
@@ -173,9 +206,9 @@ namespace BattletechCoop.Sync
         {
             if (channel == ChannelUpdate && session.Role == SessionRole.Guest)
             {
-                // A ship still loading predates this change: apply it once the ship is showing.
-                if (ShipView.Ready) ApplyUpdate(payload);
-                else queuedUpdates.Add(payload);
+                // In order with company statuses; applied now unless something before it waits
+                // (a ship still loading, or a held status).
+                Receive(GuestInbox.Kind.ShipUpdate, payload);
                 return;
             }
             using (var r = new BinaryReader(new MemoryStream(payload), Encoding.UTF8))
@@ -184,6 +217,7 @@ namespace BattletechCoop.Sync
                 {
                     var ok = r.ReadBoolean();
                     var text = r.ReadString();
+                    if (PendingRequests > 0) PendingRequests--;
                     Log.Info($"SHIP guest: host {(ok ? "applied" : "refused")}: {text}");
                     ShowNotice(ok ? "Host applied: " + text : "Host refused: " + text);
                 }
@@ -206,7 +240,95 @@ namespace BattletechCoop.Sync
         }
 
         // A full ship save supersedes the updates sent before it.
-        public static void ShipSaveReceived() => queuedUpdates.Clear();
+        public static void ShipSaveReceived()
+        {
+            Inbox.Clear();
+            CompanyLive.ShipSaveReceived();
+            healWanted = false;
+            healAskedForThisShip = false;
+        }
+
+        // Guest: something about the host's ship arrived; apply what may be applied now.
+        internal static void Receive(GuestInbox.Kind kind, byte[] payload)
+        {
+            Inbox.Add(kind, payload);
+            ProcessInbox(false);
+        }
+
+        // Applies queued host changes in order. Statuses wait while the player is editing, unless
+        // force: the player is about to make a change of their own, which must land after them.
+        private static string holdReason;
+
+        internal static void ProcessInbox(bool force)
+        {
+            if (Inbox.Count == 0) { holdReason = null; return; }
+            var game = UnityGameInstance.BattleTechGame;
+            var sim = game?.Combat == null ? game?.Simulation : null;
+            var ready = ShipView.Ready && sim != null;
+            var editing = GuestEditing();
+            var statusesMayApply = !ShipView.Busy && (force || !editing);
+            Inbox.Process(ready, statusesMayApply, force, ApplyUpdate, payload =>
+            {
+                try { CompanyLive.ApplyStatus(sim, payload); }
+                catch (Exception e)
+                {
+                    Log.Error("LIVE guest: could not apply a company update", e);
+                    WantHeal("a company update failed here");
+                }
+            });
+            // Say once per hold why host changes are waiting, so a stalled day can be explained.
+            var reason = Inbox.Count == 0 ? null
+                : !ready ? (sim == null ? "not on the ship" : "the host's ship is loading")
+                : ShipView.Busy ? "a fresh ship was asked for"
+                : editing ? "the MechLab is open or pilot training is unconfirmed" : "waiting";
+            if (reason != null && reason != holdReason)
+                Log.Info($"LIVE guest: holding {Inbox.Count} host change(s): {reason}");
+            else if (reason == null && holdReason != null)
+                Log.Info("LIVE guest: caught up with the host");
+            holdReason = reason;
+        }
+
+        // Guest: this copy of the host's ship is out of date (a host change didn't apply here).
+        internal static void WantHeal(string reason)
+        {
+            if (healAskedForThisShip || UnityEngine.Time.realtimeSinceStartup - lastHealAt < MinSecondsBetweenHeals)
+            {
+                ShowNotice($"Could not show the host's change ({reason}). Use \"Refresh the host's ship\".");
+                return;
+            }
+            healWanted = true;
+            healReason = reason;
+            Log.Info("SHIP guest: out of date with the host (" + reason + "); will ask for a fresh ship");
+        }
+
+        // The player is in the middle of something a ship reload would throw away: the MechLab is
+        // open, or the shown pilot has unconfirmed training (as RedrawScreens waits for).
+        internal static bool GuestEditing()
+        {
+            bool IsOpen(UIModule module) => module != null && module.gameObject.activeInHierarchy && module.Visible;
+            if (IsOpen(UnityEngine.Object.FindObjectOfType<MechLabPanel>())) return true;
+            var barracks = UnityEngine.Object.FindObjectOfType<SGBarracksWidget>();
+            return IsOpen(barracks) && barracks.IsCurPilotModified();
+        }
+
+        private static void UpdateHeal()
+        {
+            if (!healWanted || !ShipView.Ready || ShipView.Busy) return;
+            var session = CoopController.Instance?.Session;
+            if (session == null || session.Role != SessionRole.Guest || !session.IsOpen) { healWanted = false; return; }
+            if (GuestEditing())
+            {
+                if (UnityEngine.Time.realtimeSinceStartup >= NoticeUntil)
+                    ShowNotice("The host's ship changed; updating once you finish here", 4f);
+                return;
+            }
+            healWanted = false;
+            healAskedForThisShip = true;
+            lastHealAt = UnityEngine.Time.realtimeSinceStartup;
+            Log.Info("SHIP guest: asking for a fresh ship to catch up (" + healReason + ")");
+            ShipView.RequestRefresh(session);
+            ShowNotice("Catching up with the host's ship...", 60f);
+        }
 
         private static void ApplyUpdate(byte[] payload)
         {
@@ -223,7 +345,7 @@ namespace BattletechCoop.Sync
                 else
                 {
                     Log.Info($"SHIP guest: could not apply the host's change ({what}): {result}");
-                    ShowNotice($"Could not show the host's change ({what}): {result}. Use \"Refresh the host's ship\".");
+                    WantHeal($"{what}: {result}");
                 }
             }
         }
@@ -266,20 +388,19 @@ namespace BattletechCoop.Sync
 
         public static void Reset()
         {
-            queuedUpdates.Clear();
+            Inbox.Clear();
             screensDirty = false;
+            healWanted = false;
+            healAskedForThisShip = false;
+            PendingRequests = 0;
         }
 
         public static void Update()
         {
             ClearCaptureDepth();
-            if (queuedUpdates.Count > 0 && ShipView.Ready)
-            {
-                var updates = queuedUpdates.ToArray();
-                queuedUpdates.Clear();
-                foreach (var u in updates) ApplyUpdate(u);
-            }
+            ProcessInbox(false);
             if (screensDirty) RedrawScreens();
+            UpdateHeal();
         }
 
         // After a change from the other side, redraw the Mech Bay or Barracks if open, as the game

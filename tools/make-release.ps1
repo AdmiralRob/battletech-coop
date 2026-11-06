@@ -124,6 +124,38 @@ chances), so both screens play out the same way. Camera speeds and other persona
 unchanged. The friend's own settings are never overwritten: they come back when the session
 ends, and any change the friend makes while connected is kept for afterwards.
 
+Live company updates (0.0.16; ordering and travel fixes 0.0.17 to 0.0.24)
+-------------------------------------------------------------------------
+0.0.24: arriving in a system no longer makes the friend's game reload, and a reload no longer
+leaves the friend in the Navigation room without menus.
+0.0.22/0.0.23: after a jump the friend's Store and Hiring Hall now stay as the host's (before, the
+friend's game replaced them with its own a moment later, which forced a reload), and a reload
+no longer gets stuck on the loading screen (a game error in the Barracks button's Hiring Hall
+menu stopped the reload from finishing).
+0.0.21: the travel entry on the friend's schedule now counts down day by day with the host's,
+starting a trip no longer fails when the friend hasn't opened the starmap, and a refit the
+host accepts during a jump no longer gets progress for a day that passed before it.
+0.0.20: travelling no longer makes the friend's game reload the ship (black screen) when the
+host presses Go, at each jump, or after travel events. The friend's ship follows the host's
+route and jumps, and the Store and Hiring Hall in the new system show the host's stock and
+pilots. The friend's contract list stays empty after a jump (contracts are the host's).
+0.0.19: the schedule's finance report and travel countdowns now tick on the friend's screen
+as they do on the host's, and browsing a room the host hasn't visited no longer makes the
+friend's game reload.
+0.0.18: after a jump, the friend now docks at the planet together with the host (before, the
+friend stayed "in space" until a refresh, so the Store was unavailable), and a work order one
+player cancels now also leaves the other player's schedule.
+The friend's view of the host's company now keeps up without reloading. As the host passes
+time, the friend sees the day, C-Bills, morale, inventory, pilot XP and injuries change, and
+refits and healing finish on the same day as on the host. Event results that change those
+numbers show up within a second.
+After a mission, the friend's ship now includes the mission's C-Bills and pilot XP (before, it
+arrived just before they were paid, so the host's pilot training could not be shown).
+If the friend's copy ever stops matching the host's (for example an event that adds a mech),
+it catches up with a fresh ship by itself, waiting until the
+friend closes the MechLab or confirms pilot training. This happens at most once every 5 minutes;
+otherwise use "Refresh the host's ship".
+
 Known limits: no saving or loading during co-op combat; if someone disconnects mid-battle, the
 battle cannot be resumed together.
 

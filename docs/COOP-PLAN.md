@@ -39,7 +39,8 @@ Two players (later 3–4) play one BattleTech Career together.
 | Branch | Pair | Status |
 |---|---|---|
 | `codex/0.0.14-movement-fix` | Morgan + ChatGPT | Merged (PR #1); in live testing |
-| `feature/settings-sync` | Rob + Claude | Host's combat pacing settings apply on the guest |
+| `feature/settings-sync` | Rob + Claude | PR #2: host's combat pacing settings apply on the guest |
+| `feature/live-company` | Rob + Claude | Guest's copy of the company keeps up live (builds on PR #2) |
 | `feature/ship-navigation` | Morgan + ChatGPT (proposed) | Design in Morgan's proposal |
 | `feature/split-lance-2x2` | TBD | After the movement fix is confirmed live |
 
@@ -54,7 +55,8 @@ dispatched explicitly.
 | 29–31 | Ship navigation |
 | 32–34 | Lance ownership |
 | 35 | Settings sync (`SettingsSync.Channel`) |
-| 36–39 | Spare; claim here before use |
+| 36 | Live company updates (`CompanyLive.Channel`) |
+| 37–39 | Spare; claim here before use |
 
 ## Phases
 
@@ -143,6 +145,168 @@ Design (`Sync/SettingsSync.cs`):
 - **The guest's own values return** when the session closes.
 - **Regression tests:** `tests/SettingsTests` compiles the real `SettingsSync.cs` against
   stand-ins that follow the game's save order.
+
+## Feature: live company updates (2026-11-01)
+
+**Problem:** the guest saw the host's company as of the last full ship. Day, C-Bills, XP and
+finished refits only showed up after a mission or a manual refresh. Logs from 2026-11-01
+showed two causes:
+
+1. **The post-mission ship was sent too early.** It went out when combat ended, but
+   `SimGameState.ResolveCompleteContract` (C-Bills, pilot XP, reputation, morale, salvage) runs
+   later from `SimGameState.Update`. `OnCompleteContract` sets `CompletedContract`, and
+   `ResolveCompleteContract` clears it. Every host pilot-training update then failed on the
+   guest ("needs 1300 XP, the pilot has 500").
+2. **Nothing sent time passing, events or travel.**
+
+Rob's decisions:
+- Live updates, with no routine reloads.
+- A reload that is needed waits until the guest isn't editing.
+
+Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
+
+- **Snapshot timing:** `ShipView` holds the ship while `CompletedContract != null`.
+- **Each day:** the host records the work-queue steps `OnDayPassed` ran, in order
+  (`UpdateMechLabWorkQueue(passDay)`, `UpdateInjuries()`). The guest replays them with
+  `ShipRequests.RunAsRemote`, so nothing is sent back. They depend only on the queues and the
+  MechTech/MedTech skills, so refits finish and pilots heal on the same day on both copies.
+- **Every change** (each day, plus a once-a-second fingerprint check on the host): the company's
+  and each pilot's stats that changed since the last ship or status, set on the guest with
+  `StatCollection.Set` / `AddStatistic` / `RemoveStatistic`, plus `DaysPassed` and
+  `DayRemainingInQuarter`. The guest redraws with `SGRoomManager.RefreshDay` /
+  `RefreshTimeline` / `RefreshDisplay` and the existing screen redraw.
+- **Fingerprint:** days, all company and pilot stats, roster, bays, and both queues (no
+  work-order IDs, which differ between copies).
+  - On a mismatch, the guest logs its copy and catches up with a fresh ship
+    (`ShipRequests.WantHeal`).
+  - The catch-up waits for `GuestEditing()` (MechLab open, or unconfirmed training).
+  - At most one automatic catch-up per received ship and per 5 minutes.
+  - The check is skipped while a guest request is unanswered (`PendingRequests`).
+- **Also:**
+  - When an ordinary host update can't apply, the guest now catches up the same way instead
+    of only showing a notice.
+  - Statuses wait on the guest while its ship loads or the player is editing, and a new ship
+    clears them.
+  - The host doesn't send statuses while a ship is pending (`ShipView.SnapshotPending`).
+- **Order on the guest** (PR #3 review): ship updates (channel 23) and statuses (channel 36) share
+  one queue (`GuestInbox`, owned by `ShipRequests`), applied strictly in the order the host sent
+  them. A held status holds everything behind it, so a day replays against the queue as it was
+  on the host that day.
+  - Before any local guest change, `ShipRequests.CaptureSession` (called first, in a prefix, by
+    every capture) applies everything held. The change then lands after the host's earlier days.
+- **Travel** (PR #3 review): the current system is part of the fingerprint. The host sends a fresh
+  ship on `SimGameState.SetCurrentSystem`, since the new system's store, hiring hall and
+  contracts come from the host. On the guest, a ship it didn't ask for waits while it's editing.
+- **Live test 2026-11-01 (0.0.17), fixed in 0.0.18:**
+  - *Guest stuck "in space" after the host docked.* `SetCurrentSystem` fires at the jump point;
+    docking at the planet days later is only a travel-state change (`SGTravelManager`:
+    `IN_SYSTEM`, `TRANSIT_FROM_JUMP`...), which wasn't synced or fingerprinted.
+    - Statuses now carry `TravelState` and `TravelTime`. The guest applies them with the state
+      machine's own `ForceTravelState` and `SetTravelTime`, then `RefreshLeftNavFromShipScreen`
+      (Store access), with no reload.
+    - The fingerprint has a `travel` section.
+    - The host holds a status while a jump animation plays (`TRANSITION_ANIMATING`), keeping
+      its days.
+  - *A cancelled order stayed on the other player's schedule.* The Mech Bay's own cancel
+    (`MechBayMechInfoWidget.ConfirmCancelWorkOrder`) follows `CancelWorkOrder` with
+    `UpdateMechLabWorkQueue(false)` and `RefreshTimeline`. The remote cancel now does the same.
+  - *An unexplained catch-up after storing a 'Mech.* The fingerprint is now in named sections
+    (day, system, travel, company, pilots, bays, mechlab, medbay) with a hash each.
+    - On a mismatch, the guest logs the differing sections in full and reports their names to
+      the host (channel 36, guest → host).
+    - The host logs its own copy of those sections.
+- **PR #3 review 2, fixed in 0.0.19:**
+  - *Timeline countdowns.* The quarterly finance report and the travel order are timeline
+    entries (`WorkOrderEntry` with private `Cost` / `PaidCost`). `OnDayPassed` pays them
+    (`FinancialReportNotification.PayCost`, `Starmap.PayTravelOrderCost`) and replaces the
+    finance one at quarter rollover; the day counters don't move them.
+    - Statuses now carry both entries' cost and paid cost, and the guest sets them exactly. A
+      finished travel order is removed as the game does (`Starmap.RemoveCompletedTravelOrder`).
+    - Both remaining costs are in the fingerprint (`day` and `travel` sections).
+  - *Room-visit flags.* `COMPANY_HasVisitedRoom_*` (set only by each room's `EnterRoom`) and
+    `COMPANY_HasSeenTutorial_MechLab` / `COMPANY_HasSeenECMReview_MechLab` (set only by
+    `MechLabPanel`) are local to each player. They're left out of the fingerprint
+    (`CompanyFingerprint.IsLocalPresentation`) but still sync from the host. Other
+    "viewed"/"seen" stats come from the day simulation and stay checked.
+  - *Diagnostics.* The guest logs once per hold why host changes are waiting, and how many.
+- **Live test 2026-11-01 (0.0.19), fixed in 0.0.20:** the guest went to a black screen and
+  reloaded the ship twice per trip, and again after travel events.
+  - *At Go:* the host's `SetActivePath` route and travel order weren't in statuses, so the first
+    day of travel failed the `travel` section and the guest asked for a catch-up.
+  - *At the jump:* the host sent a full ship on `SetCurrentSystem` (a new system's store and
+    hiring hall are generated on the host only).
+  - Now statuses carry the system id, the route (system ids) and the travel index. The guest
+    follows them with the game's own calls: `PotentialPath` + `SetActivePath()` for a new route,
+    `IncrementTravelIndexAndUpdateCurrentSystem()` for the next jump on that route, or
+    `SetCurrentSystem(system, true, false)` otherwise. The arrival full ship is gone.
+  - The market (each shop's `ActiveInventory` and `LastRefreshDay`, the system's
+    `AvailablePilots`) is sent as JSON whenever its hash changes. The guest applies it after its
+    own `RefreshShops` finishes (`Shop.IsPending`) and the system matches; new pilots are linked
+    to the `DataManager` and their dependencies loaded as `LanceLoader` does. The host holds a
+    status while its own shops are pending.
+  - The fingerprint now includes the route and index (`travel`) and a `market` section.
+  - Known gap: after a jump the guest's contract list is empty (`OnSystemExit` →
+    `ResetContracts`; contracts are host-only).
+- **PR #3 review 3, fixed in 0.0.21:**
+  - *Route without its travel order.* `SetActivePath` → `CreateActivePath` takes
+    `PendingTravelOrder` (made by `OnPathfindingComplete`, which following a route skips) as the
+    trip's timeline entry; with none, `TaskTimelineWidget.AddEntry` threw. Statuses now carry the
+    travel order with its legs (`TravelOrderData`), and the guest builds it with the game's own
+    constructors (`WorkOrderEntry_TravelGeneric` and its `TravelToJumpPoint` / `TravelJumping` /
+    `TravelToSystem` legs) and sets it as `PendingTravelOrder` before activating, replacing any
+    order it planned itself.
+  - *Leg payments.* `PayCost` pays the legs first and `GetRemainingCost` sums them, so a day's
+    travel moves a leg's `PaidCost` while the parent stays 0/0. The guest now sets every leg's
+    `Cost` / `PaidCost`; a trip of another shape is replaced on the timeline
+    (`RemoveCompletedTravelOrder`, then `AddWorkQueueEntry`). The fingerprint lists each entry's
+    type and payments (not the localized descriptions).
+  - *Held days overtaken by later actions.* The host no longer holds a day's status: it goes out
+    when the day ends, in order with everything sent after it. If the host hasn't settled (jump
+    animation, shops loading), it is marked partial: the guest applies its queue steps and stats
+    but not travel or the market, and skips the fingerprint check. A settled status follows as
+    soon as the host settles (`HostStatusGate`).
+  - Checked against the real DLL: the built trip's types, parents and remaining cost; a day's
+    `PayCost` paying the first leg with the parent at 0/0; the guest's legs taking the host's
+    payments through two stages; the `Starmap` members set.
+- **Live test 2026-11-05 (0.0.21), fixed in 0.0.22 and 0.0.23:** travel worked (route, partial/settled
+  days, jump, market applied), but right after the jump to Renfield the guest's store and hiring
+  hall differed and the catch-up reload never finished.
+  - *Market overwritten.* After a jump the game makes its own market late:
+    `SetCurrentSystem` → `FindRouteTo(TargetSystem, OnTargetSystemFound)` → `RefreshSystem` →
+    `GeneratePilots` + `RefreshShops`, a pathfinding callback that ran after the host's market
+    was applied (guest pilots `PilotGen_SGRef_1000000861..` vs the host's `_861..`). While the
+    guest shows the host's ship (`ShipView.Ready`) it now skips `StarSystem.RefreshShops` and
+    `StarSystem.GeneratePilots`; the market comes only from the host.
+  - *Reload stuck.* The catch-up ship arrived ~3 s after the jump and its load never reached
+    `_OnAttachUXComplete`. A ship now waits 8 s after a followed jump and while the
+    `DataManager` is loading (at most 30 s); a load still unfinished after 90 s is logged and
+    tells the player which logs to send.
+  - *Root cause of the stuck reload* (guest `battletech_log.txt`): a `NullReferenceException` in
+    `SGNavigationButton.ManageHiringHallFlyout`, called from `_OnAttachUXComplete` →
+    `SGRoomManager.OnSimGameReady` → `RefreshDisplay`. It aborted `_OnAttachUXComplete`, so the
+    loaded ship never finished attaching. A prefix now skips that method (it only adds the
+    Barracks button's Hiring Hall flyout) when its sim, current system, def, pilots or owner
+    is missing, and logs which. The host also no longer sends a full ship until it has settled
+    (`CompanyLive.Settled`: no jump animation, shops not pending).
+- **Second test 2026-11-05 (0.0.23), fixed in 0.0.24:**
+  - *Arrival not followed.* The host's `SGTravelManager.HandleNextTravelStep` runs
+    `Starmap.CompletedTravelClear` on arrival (`ActivePath`, `TravelOrder`, `TravelItem` to null);
+    the guest kept its route, so `travel` differed and it reloaded. The guest now does the same
+    when the host's route is empty, and always takes the host's travel index.
+  - *Reload aborted again,* one line later: `ManageShopFlyout`, with the button's `simState`
+    null. Only `SGNavigationButton.SetupElement` sets it, from `SGNavigationList.Start` with
+    `UnityGameInstance.BattleTechGame.Simulation` at the time Unity runs `Start`; after a reload
+    that can be none or the replaced sim. A prefix on `SGNavigationList.RefreshButtonStates`
+    (the only caller of `SetStateAccordingToSimDropship`, which runs both flyouts and reads
+    `simState`) points all seven buttons at the sim it is handed first.
+- **Not live yet** (caught by the fingerprint, then a catch-up):
+  - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
+  - the contract list of a new system;
+  - Argo upgrade construction.
+- **Tests:** `tests/CompanyLiveTests` covers the deltas, the wire format, the guest's application
+  order (both review scenarios, against a model of the Mech Bay queue) and the fingerprint
+  (including the system). The `StatCollection`
+  apply path and the `OnDayPassed` patch target were checked against the real game DLL.
 
 ## Open questions
 

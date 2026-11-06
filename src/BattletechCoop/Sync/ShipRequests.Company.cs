@@ -229,6 +229,12 @@ namespace BattletechCoop.Sync
                     var entry = sim.MechLabQueue.FirstOrDefault(e => e is WorkOrderEntry_MechLab m && m.MechID == mechId && e.GetType().Name == typeName);
                     if (entry == null) return "no such work order (already finished?)";
                     sim.CancelWorkOrder(entry, refund);
+                    // As the Mech Bay's own cancel (MechBayMechInfoWidget.ConfirmCancelWorkOrder):
+                    // CancelWorkOrder leaves the schedule entry; UpdateMechLabWorkQueue(false)
+                    // removes it (no day passes) and RefreshTimeline redraws the schedule. Without
+                    // this the other player's schedule kept the cancelled order (2026-11-01).
+                    sim.UpdateMechLabWorkQueue(false);
+                    sim.RoomManager?.RefreshTimeline(false);
                     return null;
                 }
                 case KindHeraldry:

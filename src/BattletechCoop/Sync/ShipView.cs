@@ -5,6 +5,7 @@ using System.Text;
 using BattleTech;
 using BattleTech.Save;
 using BattleTech.Save.SaveGameStructure;
+using BattleTech.UI;
 using BattletechCoop.Net;
 using Harmony;
 using HBS;
@@ -40,6 +41,9 @@ namespace BattletechCoop.Sync
         public static float SentAt { get; private set; } = -1; // host: last ship sent
         private static float refreshAskedAt;
         private static bool refreshReceived;
+        private static float loadStartedAt = -1, quietWaitSince = -1;
+        private static bool stuckNoticeShown;
+        private static readonly float JumpSettleSeconds = 8f, MaxQuietWait = 30f, StuckAfter = 90f;
 
         // The host's ship is showing and no newer one is on its way.
         public static bool Ready => GuestViewing && ShowingSince >= 0 && pendingLoad == null && !awaitingLoaded;
@@ -57,6 +61,10 @@ namespace BattletechCoop.Sync
             urgent = false;
             ShipRequests.Reset();
         }
+
+        // Host: a full ship is waiting to go out (e.g. after a mission, until its rewards are
+        // in). Live company updates hold off until it has: it supersedes them.
+        internal static bool SnapshotPending => dirty;
 
         // Something the guest should see changed (or the guest asked).
         public static void MarkDirty(string why)
@@ -85,6 +93,15 @@ namespace BattletechCoop.Sync
             if (session.Players.Count(p => p.Index != 0) == 0) return;
             if (!urgent && DateTime.UtcNow - lastSent < MinInterval) return;
             if (!game.Simulation.CanSave(SaveReason.MANUAL, false)) return;
+            // After a mission the ship is up before the rewards are in: OnCompleteContract sets
+            // CompletedContract, and SimGameState.Update calls ResolveCompleteContract (C-Bills,
+            // pilot XP, reputation, morale, salvage; it clears CompletedContract) only once no
+            // popup is open. A ship sent before that is missing them, and later pilot training
+            // updates fail on the guest for lack of XP (seen 2026-11-01).
+            if (game.Simulation.CompletedContract != null) return;
+            // Not mid-jump or while the new system's shops are still loading: the ship would carry
+            // a half-made system (live statuses wait for the same thing).
+            if (!CompanyLive.Settled(game.Simulation)) return;
 
             dirty = false;
             urgent = false;
@@ -96,6 +113,7 @@ namespace BattletechCoop.Sync
                 var company = game.Simulation.CompanyName ?? "";
                 session.SendGame(ChannelShipSave, Build(w => { w.Write(company); w.Write(bytes.Length); w.Write(bytes); }));
                 SentAt = UnityEngine.Time.realtimeSinceStartup;
+                CompanyLive.ShipSent(game.Simulation);
                 Log.Info($"SHIP host: sent {Summary(game.Simulation)} ({bytes.Length} bytes, {started.ElapsedMilliseconds} ms)");
             }
             catch (Exception e)
@@ -111,6 +129,14 @@ namespace BattletechCoop.Sync
             {
                 Refreshing = false;
                 ShipRequests.ShowNotice("No ship from the host yet: it is sent once the host is on the ship screen.", 8f);
+            }
+            if (awaitingLoaded && !stuckNoticeShown && loadStartedAt >= 0
+                && UnityEngine.Time.realtimeSinceStartup > loadStartedAt + StuckAfter)
+            {
+                stuckNoticeShown = true;
+                Log.Info($"SHIP guest: the host's ship has been loading for {StuckAfter:0} s without finishing");
+                ShipRequests.ShowNotice("Loading the host's ship seems stuck. Restart the game and send both " +
+                                        "BattletechCoop.log files and Mods\\.modtek\\battletech_log.txt.", 20f);
             }
             if (awaitingLoaded)
             {
@@ -135,6 +161,31 @@ namespace BattletechCoop.Sync
             var game = SceneSingletonBehavior<UnityGameInstance>.HasInstance ? UnityGameInstance.BattleTechGame : null;
             if (game == null || game.Combat != null) return; // finish the battle / results first
             if (LazySingletonBehavior<LoadTransitioning>.Instance == null) return;
+            // A ship the player didn't ask for (the host arrived in another system, came back from
+            // a mission...) waits while they are editing, so nothing they're doing is thrown away.
+            if (!Refreshing && ShipRequests.GuestEditing())
+            {
+                if (UnityEngine.Time.realtimeSinceStartup >= ShipRequests.NoticeUntil)
+                    ShipRequests.ShowNotice("The host's ship changed; updating once you finish here", 4f);
+                return;
+            }
+
+            // Not in the middle of the game's own work: right after following a jump (its
+            // pathfinding callback and the new system's data are still coming in) or while data
+            // is loading. A ship loaded right after a jump never finished (live test 2026-11-05).
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            var loading = game.DataManager != null && game.DataManager.IsLoading;
+            if (now < CompanyLive.LastJumpAt + JumpSettleSeconds || loading)
+            {
+                if (quietWaitSince < 0)
+                {
+                    quietWaitSince = now;
+                    Log.Info($"SHIP guest: the host's ship waits for this game to settle ({(loading ? "data loading" : "just jumped")})");
+                }
+                if (now < CompanyLive.LastJumpAt + JumpSettleSeconds || now < quietWaitSince + MaxQuietWait) return;
+                Log.Info("SHIP guest: still loading data after 30 s; loading the host's ship anyway");
+            }
+            quietWaitSince = -1;
 
             var bytes = pendingLoad;
             pendingLoad = null;
@@ -146,6 +197,8 @@ namespace BattletechCoop.Sync
                 ShowingSince = -1;
                 simBeforeLoad = game.Simulation;
                 awaitingLoaded = true;
+                loadStartedAt = UnityEngine.Time.realtimeSinceStartup;
+                stuckNoticeShown = false;
                 Log.Info($"SHIP guest: loading the host's ship '{GuestCompany}'");
                 Traverse.Create(LazySingletonBehavior<LoadTransitioning>.Instance)
                     .Method("FileReadComplete", new object[] { true, save }).GetValue();
@@ -201,6 +254,71 @@ namespace BattletechCoop.Sync
                 w.Flush();
                 return stream.ToArray();
             }
+        }
+    }
+
+    // Live test 2026-11-05: the guest's catch-up ship, loaded right after a jump, never finished.
+    // Its battletech_log.txt: a NullReferenceException in SGNavigationButton.ManageHiringHallFlyout
+    // (SimGameState._OnAttachUXComplete -> SGRoomManager.OnSimGameReady -> RefreshDisplay ->
+    // SGNavigationList.RefreshButtonStates), which aborted _OnAttachUXComplete, so the load
+    // never completed. The method only decides whether the Barracks button gets a Hiring Hall
+    // flyout, from simState.CurSystem's owner reputation and AvailablePilots.Count; skip it while
+    // any of those isn't there yet (the next redraw adds the flyout) and log which one it was.
+    //
+    // Second test, same day (0.0.23): the same abort one line later, in ManageShopFlyout, and our
+    // guard above logged "company not there yet": the button's simState itself was null. It is
+    // set only by SGNavigationButton.SetupElement, which SGNavigationList.Start calls with
+    // UnityGameInstance.BattleTechGame.Simulation, i.e. whichever sim exists when Unity first
+    // runs Start. After a reload that can be none (or the sim the load replaced), while
+    // OnSimGameReady already redraws the buttons. SGNavigationList.RefreshButtonStates (the only
+    // caller of SetStateAccordingToSimDropship, which runs both flyouts and itself reads
+    // simState) is handed the sim being shown, so the buttons are pointed at it first, as
+    // SetupElement would.
+    [HarmonyPatch(typeof(SGNavigationList), "RefreshButtonStates")]
+    public static class NavigationButtonsSimPatch
+    {
+        private static readonly string[] Buttons =
+            { "argoButton", "navigationButton", "cmdCenterButton", "mechBayButton", "barracksButton", "captainQuartersButton", "engineeringButton" };
+
+        static void Prefix(SGNavigationList __instance, SimGameState simState)
+        {
+            if (simState == null) return;
+            try
+            {
+                var fixedCount = 0;
+                foreach (var name in Buttons)
+                {
+                    var button = Traverse.Create(__instance).Field(name).GetValue<SGNavigationButton>();
+                    if (button == null) continue;
+                    var field = Traverse.Create(button).Field("simState");
+                    if (ReferenceEquals(field.GetValue<SimGameState>(), simState)) continue;
+                    field.SetValue(simState);
+                    fixedCount++;
+                }
+                if (fixedCount > 0) Log.Info($"UI: {fixedCount} navigation buttons pointed at the company being shown");
+            }
+            catch (Exception e) { Log.Error("UI: navigation buttons check", e); }
+        }
+    }
+
+    [HarmonyPatch(typeof(SGNavigationButton), "ManageHiringHallFlyout")]
+    public static class HiringHallFlyoutGuardPatch
+    {
+        static bool Prefix(SGNavigationButton __instance)
+        {
+            string missing;
+            try
+            {
+                var sim = Traverse.Create(__instance).Field("simState").GetValue<SimGameState>();
+                var system = sim?.CurSystem;
+                missing = sim == null ? "company" : system == null ? "current system"
+                    : system.Def == null ? "system def" : system.AvailablePilots == null ? "pilots for hire"
+                    : system.OwnerValue == null ? "system owner" : null;
+            }
+            catch (Exception e) { missing = e.GetType().Name; }
+            if (missing == null) return true;
+            Log.Info($"UI: Hiring Hall flyout skipped ({missing} not there yet)");
+            return false;
         }
     }
 
