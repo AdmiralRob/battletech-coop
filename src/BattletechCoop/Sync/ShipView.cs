@@ -40,6 +40,9 @@ namespace BattletechCoop.Sync
         public static float SentAt { get; private set; } = -1; // host: last ship sent
         private static float refreshAskedAt;
         private static bool refreshReceived;
+        private static float loadStartedAt = -1, quietWaitSince = -1;
+        private static bool stuckNoticeShown;
+        private static readonly float JumpSettleSeconds = 8f, MaxQuietWait = 30f, StuckAfter = 90f;
 
         // The host's ship is showing and no newer one is on its way.
         public static bool Ready => GuestViewing && ShowingSince >= 0 && pendingLoad == null && !awaitingLoaded;
@@ -123,6 +126,14 @@ namespace BattletechCoop.Sync
                 Refreshing = false;
                 ShipRequests.ShowNotice("No ship from the host yet: it is sent once the host is on the ship screen.", 8f);
             }
+            if (awaitingLoaded && !stuckNoticeShown && loadStartedAt >= 0
+                && UnityEngine.Time.realtimeSinceStartup > loadStartedAt + StuckAfter)
+            {
+                stuckNoticeShown = true;
+                Log.Info($"SHIP guest: the host's ship has been loading for {StuckAfter:0} s without finishing");
+                ShipRequests.ShowNotice("Loading the host's ship seems stuck. Restart the game and send both " +
+                                        "BattletechCoop.log files and Mods\\.modtek\\battletech_log.txt.", 20f);
+            }
             if (awaitingLoaded)
             {
                 var current = SceneSingletonBehavior<UnityGameInstance>.HasInstance ? UnityGameInstance.BattleTechGame : null;
@@ -155,6 +166,23 @@ namespace BattletechCoop.Sync
                 return;
             }
 
+            // Not in the middle of the game's own work: right after following a jump (its
+            // pathfinding callback and the new system's data are still coming in) or while data
+            // is loading. A ship loaded right after a jump never finished (live test 2026-11-05).
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            var loading = game.DataManager != null && game.DataManager.IsLoading;
+            if (now < CompanyLive.LastJumpAt + JumpSettleSeconds || loading)
+            {
+                if (quietWaitSince < 0)
+                {
+                    quietWaitSince = now;
+                    Log.Info($"SHIP guest: the host's ship waits for this game to settle ({(loading ? "data loading" : "just jumped")})");
+                }
+                if (now < CompanyLive.LastJumpAt + JumpSettleSeconds || now < quietWaitSince + MaxQuietWait) return;
+                Log.Info("SHIP guest: still loading data after 30 s; loading the host's ship anyway");
+            }
+            quietWaitSince = -1;
+
             var bytes = pendingLoad;
             pendingLoad = null;
             try
@@ -165,6 +193,8 @@ namespace BattletechCoop.Sync
                 ShowingSince = -1;
                 simBeforeLoad = game.Simulation;
                 awaitingLoaded = true;
+                loadStartedAt = UnityEngine.Time.realtimeSinceStartup;
+                stuckNoticeShown = false;
                 Log.Info($"SHIP guest: loading the host's ship '{GuestCompany}'");
                 Traverse.Create(LazySingletonBehavior<LoadTransitioning>.Instance)
                     .Method("FileReadComplete", new object[] { true, save }).GetValue();

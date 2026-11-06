@@ -268,6 +268,20 @@ Design (`Sync/CompanyLive.cs`, `Sync/StatDelta.cs`, channel 36):
   - Checked against the real DLL: the built trip's types, parents and remaining cost; a day's
     `PayCost` paying the first leg with the parent at 0/0; the guest's legs taking the host's
     payments through two stages; the `Starmap` members set.
+- **Live test 2026-11-05 (0.0.21), fixed in 0.0.22:** travel worked (route, partial/settled
+  days, jump, market applied), but right after the jump to Renfield the guest's store and hiring
+  hall differed and the catch-up reload never finished.
+  - *Market overwritten.* After a jump the game makes its own market late:
+    `SetCurrentSystem` → `FindRouteTo(TargetSystem, OnTargetSystemFound)` → `RefreshSystem` →
+    `GeneratePilots` + `RefreshShops`, a pathfinding callback that ran after the host's market
+    was applied (guest pilots `PilotGen_SGRef_1000000861..` vs the host's `_861..`). While the
+    guest shows the host's ship (`ShipView.Ready`) it now skips `StarSystem.RefreshShops` and
+    `StarSystem.GeneratePilots`; the market comes only from the host.
+  - *Reload stuck.* The catch-up ship arrived ~3 s after the jump and its load never reached
+    `_OnAttachUXComplete`. A ship now waits 8 s after a followed jump and while the
+    `DataManager` is loading (at most 30 s); a load still unfinished after 90 s is logged and
+    tells the player which logs to send. Root cause still to confirm from the guest's
+    `battletech_log.txt`.
 - **Not live yet** (caught by the fingerprint, then a catch-up):
   - things events add or remove (pilots, 'Mechs, items as objects rather than counts);
   - the contract list of a new system;

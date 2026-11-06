@@ -65,6 +65,27 @@ namespace BattletechCoop.Sync
         // A new full ship supersedes a market still waiting here.
         internal static void ShipSaveReceived() => pendingMarket = null;
 
+        // Guest: while it shows the host's ship, its stores and hiring halls come only from the
+        // host. The game makes its own after a jump, late: SetCurrentSystem -> OnSystemChange ->
+        // RefreshShops (async item collections), and FindRouteTo(TargetSystem) ->
+        // OnTargetSystemFound -> RefreshSystem -> GeneratePilots + RefreshShops, a pathfinding
+        // callback that came after the host's market was applied and replaced it (live test
+        // 2026-11-05: guest pilots PilotGen_SGRef_1000000861.. against the host's _861..).
+        // StarSystemRefreshShopsPatch / StarSystemGeneratePilotsPatch skip those on the guest.
+        internal static bool HostMarketOnly
+        {
+            get
+            {
+                var session = Session;
+                return session != null && session.State == SessionState.Active && session.Role == SessionRole.Guest && ShipView.Ready;
+            }
+        }
+
+        // Guest: when it last followed a jump. The game's own arrival work (the pathfinding
+        // callback above, the new system's data loading) runs for a few seconds after it, and a
+        // ship loaded meanwhile never finished loading (live test 2026-11-05), so ShipView waits.
+        internal static float LastJumpAt { get; private set; } = -100f;
+
         private static CoopSession Session => CoopController.Instance?.Session;
 
         private static SimGameState ShipSim()
@@ -278,6 +299,7 @@ namespace BattletechCoop.Sync
                     var node = starmap.GetSystemByID(status.SystemId);
                     if (node?.System != null) sim.SetCurrentSystem(node.System, true, false);
                 }
+                LastJumpAt = UnityEngine.Time.realtimeSinceStartup;
                 Log.Info($"LIVE guest: jumped with the host to {sim.CurSystem?.Name}");
             }
             if (status.Route.Count > 0 && TravelIndex(sim) != status.TravelIndex)
@@ -704,6 +726,29 @@ namespace BattletechCoop.Sync
     {
         static void Prefix(bool passDay) =>
             CompanyLive.RecordOp(passDay ? CompanyStatus.OpMechLabDay : CompanyStatus.OpMechLabNoDay);
+    }
+
+    // Guest: no store or hiring hall of its own while it shows the host's (CompanyLive.HostMarketOnly).
+    [HarmonyPatch(typeof(StarSystem), "RefreshShops")]
+    public static class StarSystemRefreshShopsPatch
+    {
+        static bool Prefix(StarSystem __instance)
+        {
+            if (!CompanyLive.HostMarketOnly) return true;
+            Log.Info($"LIVE guest: skipped this copy's own store refresh in {__instance?.Name} (the host's comes over)");
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(StarSystem), "GeneratePilots")]
+    public static class StarSystemGeneratePilotsPatch
+    {
+        static bool Prefix(StarSystem __instance)
+        {
+            if (!CompanyLive.HostMarketOnly) return true;
+            Log.Info($"LIVE guest: skipped this copy's own hiring hall in {__instance?.Name} (the host's comes over)");
+            return false;
+        }
     }
 
     [HarmonyPatch(typeof(SimGameState), "UpdateInjuries")]
