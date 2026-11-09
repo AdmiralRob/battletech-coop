@@ -12,7 +12,7 @@ namespace BattletechCoop.Patches
         {
             var order = invocation as InvocationMessage;
             if (order == null || order.WasNetRouted) return true;
-            if (CombatSync.HostActive && !CombatSync.Current.AllowHostMovement(order))
+            if (CombatSync.HostActive && !CombatSync.Current.AllowHostOrder(order))
             {
                 CombatSync.Current.RecoverSelection(__instance);
                 return false;

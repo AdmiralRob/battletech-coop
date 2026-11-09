@@ -139,7 +139,9 @@ namespace BattletechCoop.Sync
             return IsHost ? !guestThinks : guestThinks;
         }
 
-        private void ShowNotice(string text)
+        internal CoopSession Session => session;
+
+        internal void ShowNotice(string text)
         {
             Notice = text;
             NoticeUntil = UnityEngine.Time.realtimeSinceStartup + 6f;
@@ -284,6 +286,7 @@ namespace BattletechCoop.Sync
             if (Current != null) Log.Info($"SYNC end (session closed): {Current.Status}");
             Current = null;
             pendingStart = null;
+            LanceOwners.Reset();
             GuestsInMenu.Clear();
             lastMenuReported = false;
         }
@@ -461,6 +464,7 @@ namespace BattletechCoop.Sync
             if (IsHost)
             {
                 if (Reloading) return;
+                LanceOwners.UpdateHost(this, combat);
                 if (SaveDue()) { SendSave(); return; }
                 while (requests.Count > 0 && IsIdle(combat))
                     ProcessRequest(combat, requests.Dequeue());
@@ -678,6 +682,16 @@ namespace BattletechCoop.Sync
                 selectionOrders.RejectLocal(selection);
                 return;
             }
+            // Split lance: refuse the HUD's orders for a partner's unit right here (the host
+            // checks every request again in RunGuestOrder, including ones the HUD sends directly).
+            var owned = selection == null ? null : LanceOwners.Check(this, session.LocalIndex, invocation);
+            if (owned != null)
+            {
+                Log.Info($"LANCE guest: blocked {invocation.GetType().Name} for {LanceOwnership.ActorOf(invocation)}: {owned}");
+                ShowNotice(Capitalized(owned));
+                selectionOrders.RejectLocal(selection);
+                return;
+            }
             var combat = UnityGameInstance.BattleTechGame?.Combat;
             if (combat != null)
             {
@@ -812,6 +826,8 @@ namespace BattletechCoop.Sync
         {
             var invocation = GameSerializer.DeserializeMessage(request.Data) as InvocationMessage;
             if (invocation == null) throw new InvalidDataException("request did not contain an invocation");
+            var owned = LanceOwners.Check(this, request.Sender, invocation);
+            if (owned != null) return owned;
             var reason = MovementOrderGuard.Validate(combat, invocation, true);
             if (MovementOrderGuard.IsMovement(invocation))
                 Log.Info($"SYNC host: movement request {request.Id}: {MovementOrderGuard.Describe(combat, invocation)} result={reason ?? "allowed"}");
@@ -839,6 +855,25 @@ namespace BattletechCoop.Sync
             ShowNotice(reason);
             return false;
         }
+
+        // Host, an order from its own HUD (SelectionState.PublishInvocation): split lance first,
+        // then the movement guard. Only HUD orders are checked for ownership: GenericInvoke also
+        // runs orders the game makes by itself, and accepted guest orders (checked in
+        // RunGuestOrder), which must not be blocked here.
+        public bool AllowHostOrder(InvocationMessage invocation)
+        {
+            var owned = LanceOwners.Check(this, 0, invocation);
+            if (owned != null)
+            {
+                Log.Info($"LANCE host: blocked {invocation.GetType().Name} for {LanceOwnership.ActorOf(invocation)}: {owned}");
+                ShowNotice(Capitalized(owned));
+                return false;
+            }
+            return AllowHostMovement(invocation);
+        }
+
+        private static string Capitalized(string text) =>
+            string.IsNullOrEmpty(text) ? text : char.ToUpperInvariant(text[0]) + text.Substring(1);
 
         public void BindGuestSelection(InvocationMessage invocation, IStackSequence sequence)
         {

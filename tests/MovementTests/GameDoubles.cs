@@ -87,6 +87,9 @@ namespace BattletechCoop.Sync
         public BattleTech.UI.SelectionState RequestedSelection;
         public void RequestOrder(BattleTech.InvocationMessage invocation, BattleTech.UI.SelectionState selection = null) { Requests++; RequestedSelection = selection; }
         public bool AllowHostMovement(BattleTech.InvocationMessage invocation) { HostChecks++; return Allow; }
+        // The HUD path (GuestSelectionOrderPatch) checks ownership first, then movement.
+        public int HudChecks;
+        public bool AllowHostOrder(BattleTech.InvocationMessage invocation) { HudChecks++; return AllowHostMovement(invocation); }
         public void RecoverSelection(BattleTech.UI.SelectionState state) { Recoveries++; }
         public void BindGuestSelection(BattleTech.InvocationMessage invocation, BattleTech.IStackSequence sequence) { Bindings++; }
     }
