@@ -57,8 +57,11 @@ namespace BattletechCoop.Sync
             // A vanilla lance has four slots; a configuration listing fewer still splits 1-2 / 3-4.
             while (slotPilots.Count < 4) slotPilots.Add(null);
             var players = Math.Max(1, session.Players.Count());
-            var actors = team.units.Select(a => new KeyValuePair<string, string>(a.GUID, a.GetPilot()?.pilotDef?.Description?.Id));
-            table = LanceOwnership.FromSlots(slotPilots, actors, players);
+            var actors = team.units.Select(a => new KeyValuePair<string, string>(a.GUID, a.GetPilot()?.pilotDef?.Description?.Id)).ToList();
+            // Picked on the lance screen (LancePicker), else the slot rule (skirmish, or no picking).
+            var picks = LancePicker.LastAssignment;
+            table = picks != null ? LanceOwnership.FromPicks(actors, picks) : LanceOwnership.FromSlots(slotPilots, actors, players);
+            Log.Info($"LANCE host: owners from {(picks != null ? "the guest's picks" : "the lance slots")}");
             tableCombat = sync.CombatId;
             Log.Info($"LANCE host: {players} players; slots {string.Join(", ", slotPilots.Select(p => p ?? "-").ToArray())}; " +
                      table.Describe(g => UnitName(combat, g), p => PlayerName(session, p)));

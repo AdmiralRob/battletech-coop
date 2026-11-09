@@ -54,7 +54,7 @@ dispatched explicitly.
 |---|---|
 | 29–31 | Ship navigation |
 | 32 | Lance ownership: unit → player table (`LanceOwners.Channel`) |
-| 33 | Lance picking (planned) |
+| 33 | Lance picking: offer / picks / result (`LancePicker.Channel`) |
 | 34 | Spare for lance work |
 | 35 | Settings sync (`SettingsSync.Channel`) |
 | 36 | Live company updates (`CompanyLive.Channel`) |
@@ -152,25 +152,54 @@ Play sessions test one build at a time: bug-fix builds are `0.0.N`, lance builds
   `SelectionState`) aren't ownership-checked on the host. Guest ones are, by `RunGuestOrder`.
 - **Until slice 2:** the host fills all four slots, putting the guest's two 'Mechs in slots 3–4.
 
-### Slice 2: picking in order (next)
+### Slice 2: picking in order (done, untested in game)
 
-The lance configuration screen already supports locked slots (`LanceLoadoutSlot.SetLockState`,
-`SetLockedData`, used by contracts with required units). Plan:
+Rob, 2026-11-08: the host may keep swapping their own 'Mechs after the guest has picked.
 
-1. The host accepts a contract. In its lance configuration, slots 3–4 are locked and labelled
-   "HCASE picks", and the launch button is disabled until the guest has picked.
-2. When the host has filled slots 1–2 and clicks "Hand over to HCASE", the host sends its two
-   picks and the eligible 'Mechs and pilots (ready, not deployed, not picked) on channel 33.
-3. The guest gets a picker. The preferred option is the game's own `LanceConfiguratorPanel`
-   with slots 1–2 locked to the host's picks (`SetLockedData`). If the panel can't be opened
-   outside the contract flow, a list in the co-op window is the fallback.
-4. The guest confirms. The host fills slots 3–4 with the guest's picks via `SetLockedData` and
-   checks them (still ready, tonnage limits), then the host launches.
-5. If the guest leaves or cancels, the host's slots 3–4 unlock and the host can fill them.
+**Host** (`Sync/LancePicker.cs`, the game's own lance screen):
+- **Claiming slots 3–4.** When the screen opens in a campaign with a guest connected
+  (`LanceConfiguratorPanel.SetData`), it is noted. Once the last lance has loaded
+  (`LoadLanceConfiguration`, run when the roster is ready, or 1.5 s after `Initialized` if
+  there's none), slots 3–4 are emptied back into the lists (`slot.OnRemoveItem` +
+  `panel.ReturnItem`, as replacing a slot's 'Mech does) and locked (`SetLockState`, as
+  contracts lock slots).
+  - A slot the contract already locked stays the host's.
+  - With a smaller drop, the guest gets fewer slots (`maxUnits`).
+- **Placing the guest's picks.** The game's sequence for loading a saved lance:
+  `mechListWidget.GetMechDefByGUID`, `MechValidationRules.ValidateMechCanBeFielded`,
+  `pilotListWidget.GetPilot` (`CanPilot`), `RemovePilot`, then
+  `LanceLoadoutSlot.SetLockedData(mech, pilot, false)`, which also locks them in. The guest's
+  previous picks go back to the lists first.
+- **Launch.** `OnConfirmClicked` is refused with "Waiting for HCASE to pick their 'Mechs" until
+  the guest has sent its picks or "no 'Mechs for me". The host can still swap slots 1–2 at
+  any time.
+- **Guest leaves.** Its slots unlock, keeping its picks, and the host is told.
+- **On launch** (`OnLanceConfiguratorClosed` after confirming), the guest's pilot IDs are kept
+  as `LastAssignment`. `LanceOwners` uses them for battle ownership instead of the slot rule,
+  so a contract-locked slot can't skew it.
 
-Open questions: whether the host may still change slots 1–2 after handing over (proposed: it
-can, and that sends the guest its new picks), and how the screen shows the guest which of their
-'Mechs need repairs.
+**Guest:** a picker window, shown while the host's screen is up.
+- **Before the host has picked:** it shows "Waiting for Nines…" and the host's picks so far.
+- **After:**
+  - It lists the host's free 'Mechs (fieldable, not in the host's slots) and pilots
+    (`CanPilot`), including the guest's own current picks.
+  - The guest clicks up to two 'Mechs and as many pilots; they pair up in click order.
+  - "Send" or "No 'Mechs for me" sends the picks. The host replies placed or not, and why.
+- The guest can change its picks until the host launches.
+
+**Protocol (channel 33):**
+- `Offer` (host → guest): screen open, contract, host ready, the guest's slot count, the
+  host's picks, free 'Mechs and pilots, the guest's current picks, confirmed. Re-sent when it
+  changes, at most every 0.3 s.
+- `Picks` (guest → host).
+- `Result` (host → guest).
+- The rules (`PickRules`: host first, slot count, available, no duplicates, pilots for every
+  'Mech, launch block) and the wire format are tested in `tests/LanceTests`.
+
+**Not covered yet:**
+- The game's own "clear lance" would also empty the guest's slots.
+- The guest's picker is a plain co-op window, not the game's lance screen.
+- Skirmish keeps the slot rule with the host filling all four.
 
 ### Slice 3: HUD polish (later)
 

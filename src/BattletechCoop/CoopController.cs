@@ -226,6 +226,7 @@ namespace BattletechCoop
             Sync.ShipView.Reset();
             Sync.SettingsSync.Reset();
             Sync.CompanyLive.Reset();
+            Sync.LancePicker.Reset();
             // A guest left inside the host's battle or campaign would keep playing a copy that
             // can't affect anything ("ghost campaign"): go back to the main menu shortly after.
             if (session.Role == SessionRole.Guest && Sync.CombatSync.GuestInHostGame && !Sync.AutoSkirmish.MainMenuShowing)
@@ -275,6 +276,11 @@ namespace BattletechCoop
             if (channel == Sync.SettingsSync.Channel)
             {
                 Sync.SettingsSync.HandleGameMessage(Session, sender, payload);
+                return;
+            }
+            if (channel == Sync.LancePicker.Channel)
+            {
+                Sync.LancePicker.HandleGameMessage(Session, sender, payload);
                 return;
             }
             if (channel == Sync.LanceOwners.Channel)
@@ -366,6 +372,7 @@ namespace BattletechCoop
                 Sync.MissionStart.Update();
                 Sync.SettingsSync.Update();
                 Sync.CompanyLive.Update(Session);
+                Sync.LancePicker.Update();
                 Sync.CombatSync.UpdateIdleGuest(Session);
                 UpdateTestModes();
             }
@@ -468,6 +475,7 @@ namespace BattletechCoop
                         GUI.Label(new Rect(Screen.width / 2 - 250, 70, 500, 44), sync.Notice);
                 }
             }
+            Sync.LancePicker.OnGUI();
             if (showWindow)
                 windowRect = GUILayout.Window(0x0B7C00, windowRect, DrawWindow, "BattleTech Co-op (Ctrl+Shift+C)");
         }

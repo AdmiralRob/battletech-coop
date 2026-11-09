@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/BattletechCoop/Sync/LanceOwnership.cs" Link="LanceOwnership.cs" />
+    <Compile Include="../../src/BattletechCoop/Sync/LancePicking.cs" Link="LancePicking.cs" />
   </ItemGroup>
 </Project>

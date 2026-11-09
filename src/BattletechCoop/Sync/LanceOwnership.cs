@@ -47,6 +47,16 @@ namespace BattletechCoop.Sync
             return o;
         }
 
+        // From the picking step (LancePicker): the pilots each guest picked; everyone else is the
+        // host's. Preferred over the slot rule when there was a picking step.
+        public static LanceOwnership FromPicks(IEnumerable<KeyValuePair<string, string>> actorPilots, IDictionary<string, byte> pickedPilots)
+        {
+            var o = new LanceOwnership();
+            foreach (var actor in actorPilots)
+                o.owners[actor.Key] = actor.Value != null && pickedPilots.TryGetValue(actor.Value, out var p) ? p : (byte)0;
+            return o;
+        }
+
         public void Set(string actorGuid, byte player) => owners[actorGuid] = player;
 
         // null: not a player-lance unit (an enemy, or not tracked).
